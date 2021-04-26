@@ -229,7 +229,7 @@ class Model(nn.Module):
                         sp_center_list.append(sp_center)
 
             sp_center = torch.cat(sp_center_list, dim=1)   # c x num_sp_all (collected from all shots)
-            sp_center = sp_center * F.softmax(sp_center)
+            sp_center = sp_center * F.softmax(sp_center*sp_center)
 ########################### Guided Prototype Allocation ###########################
             # when support only has one prototype in 1-shot training
             if (self.shot == 1) and (sp_center.size(1) == 1):
@@ -255,7 +255,6 @@ class Model(nn.Module):
 
 ########################### Context Module ###########################
         if self.pyramid:
-
             out_list = []
             pyramid_feat_list = []
 

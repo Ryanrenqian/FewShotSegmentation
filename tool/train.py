@@ -6,8 +6,6 @@ import numpy as np
 import logging
 import argparse
 
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -52,51 +50,13 @@ def get_logger():
     return logger
 
 
-def worker_init_fn(worker_id):
-    random.seed(args.manual_seed + worker_id)
+# def worker_init_fn(worker_id):
+#     random.seed(args.manual_seed + worker_id)
 
 
-def main_process():
-    return not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % args.ngpus_per_node == 0)
-
-
-def main():
-    args = get_parser()
-    assert args.classes > 1
-    assert args.zoom_factor in [1, 2, 4, 8]
-    assert (args.train_h - 1) % 8 == 0 and (args.train_w - 1) % 8 == 0
-    # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-    # os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.train_gpu)
-    if args.manual_seed is not None:
-        cudnn.benchmark = False
-        cudnn.deterministic = True
-        torch.cuda.manual_seed(args.manual_seed)
-        np.random.seed(args.manual_seed)
-        torch.manual_seed(args.manual_seed)
-        torch.cuda.manual_seed_all(args.manual_seed)
-        random.seed(args.manual_seed)
-    ### multi-processing training is deprecated
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-    args.ngpus_per_node = len(args.train_gpu)
-    if len(args.train_gpu) == 1:
-        args.sync_bn = False    # sync_bn is deprecated 
-        args.distributed = False
-        args.multiprocessing_distributed = False
-    if args.multiprocessing_distributed:
-        args.world_size = args.ngpus_per_node * args.world_size
-        mp.spawn(main_worker, nprocs=args.ngpus_per_node, args=(args.ngpus_per_node, args))
-    else:
-        main_worker(args.train_gpu, args.ngpus_per_node, args)
-
-
-def main_worker(gpu, ngpus_per_node, argss):
+def main_worker(argss):
     global args
     args = argss
-
-    BatchNorm = nn.BatchNorm2d
-
     criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label)
 
     model = eval(args.arch).Model(args)
@@ -111,7 +71,7 @@ def main_worker(gpu, ngpus_per_node, argss):
         param.requires_grad = False
     for param in model.layer4.parameters():
         param.requires_grad = False
-        
+
     optimizer = model._optimizer(args)
     global logger, writer
     logger = get_logger()
@@ -119,9 +79,8 @@ def main_worker(gpu, ngpus_per_node, argss):
     logger.info("=> creating model ...")
     logger.info("Classes: {}".format(args.classes))
     logger.info(model)
-    print(args)
-
-    model = torch.nn.DataParallel(model.cuda(), device_ids=[0])
+    # model
+    model = torch.nn.DataParallel(model).cuda()
 
     if args.weight:
         if os.path.isfile(args.weight):
@@ -196,21 +155,21 @@ def main_worker(gpu, ngpus_per_node, argss):
 
         epoch_log = epoch + 1
         loss_train, aux_loss_train, mIoU_train, mAcc_train, allAcc_train = train(train_loader, model, optimizer, epoch)
-        if main_process():
-            writer.add_scalar('loss_train', loss_train, epoch_log)
-            writer.add_scalar('aux_loss_train', aux_loss_train, epoch_log)
-            writer.add_scalar('mIoU_train', mIoU_train, epoch_log)
-            writer.add_scalar('mAcc_train', mAcc_train, epoch_log)
-            writer.add_scalar('allAcc_train', allAcc_train, epoch_log)     
+        # if main_process():
+        writer.add_scalar('loss_train', loss_train, epoch_log)
+        writer.add_scalar('aux_loss_train', aux_loss_train, epoch_log)
+        writer.add_scalar('mIoU_train', mIoU_train, epoch_log)
+        writer.add_scalar('mAcc_train', mAcc_train, epoch_log)
+        writer.add_scalar('allAcc_train', allAcc_train, epoch_log)
 
         if args.evaluate and (epoch % 2 == 0 or (args.epochs<=50 and epoch%1==0)):
             loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, criterion)
-            if main_process():
-                writer.add_scalar('loss_val', loss_val, epoch_log)
-                writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
-                writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
-                writer.add_scalar('class_miou_val', class_miou, epoch_log)
-                writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
+            # if main_process():
+            writer.add_scalar('loss_val', loss_val, epoch_log)
+            writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
+            writer.add_scalar('mAcc_val', mAcc_val, epoch_log)
+            writer.add_scalar('class_miou_val', class_miou, epoch_log)
+            writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
             if class_miou > max_iou:
                 max_iou = class_miou
                 if os.path.exists(filename):
@@ -254,24 +213,24 @@ def train(train_loader, model, optimizer, epoch):
         
         output, main_loss, aux_loss = model(s_x=s_input, s_y=s_mask, x=input, y=target, s_seed=s_init_seed)
 
-        if not args.multiprocessing_distributed:
-            main_loss, aux_loss = torch.mean(main_loss), torch.mean(aux_loss)
+        # if not args.multiprocessing_distributed:
+        main_loss, aux_loss = torch.mean(main_loss), torch.mean(aux_loss)
         loss = main_loss + args.aux_weight * aux_loss
         optimizer.zero_grad()
 
         loss.backward()
         optimizer.step()
         n = input.size(0)
-        if args.multiprocessing_distributed:
-            main_loss, aux_loss, loss = main_loss.detach() * n, aux_loss * n, loss * n 
-            count = target.new_tensor([n], dtype=torch.long)
-            dist.all_reduce(main_loss), dist.all_reduce(aux_loss), dist.all_reduce(loss), dist.all_reduce(count)
-            n = count.item()
-            main_loss, aux_loss, loss = main_loss / n, aux_loss / n, loss / n
+        # if args.multiprocessing_distributed:
+        #     main_loss, aux_loss, loss = main_loss.detach() * n, aux_loss * n, loss * n
+        #     count = target.new_tensor([n], dtype=torch.long)
+        #     dist.all_reduce(main_loss), dist.all_reduce(aux_loss), dist.all_reduce(loss), dist.all_reduce(count)
+        #     n = count.item()
+        #     main_loss, aux_loss, loss = main_loss / n, aux_loss / n, loss / n
 
         intersection, union, target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
-        if args.multiprocessing_distributed:
-            dist.all_reduce(intersection), dist.all_reduce(union), dist.all_reduce(target)
+        # if args.multiprocessing_distributed:
+        #     dist.all_reduce(intersection), dist.all_reduce(union), dist.all_reduce(target)
         intersection, union, target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy()
         intersection_meter.update(intersection), union_meter.update(union), target_meter.update(target)
 
@@ -288,7 +247,7 @@ def train(train_loader, model, optimizer, epoch):
         t_h, t_m = divmod(t_m, 60)
         remain_time = '{:02d}:{:02d}:{:02d}'.format(int(t_h), int(t_m), int(t_s))
 
-        if (i + 1) % args.print_freq == 0 and main_process():
+        if (i + 1) % args.print_freq == 0:
             logger.info('Epoch: [{}/{}][{}/{}] '
                         'Data {data_time.val:.3f} ({data_time.avg:.3f}) '
                         'Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) '
@@ -304,12 +263,12 @@ def train(train_loader, model, optimizer, epoch):
                                                           aux_loss_meter=aux_loss_meter,
                                                           loss_meter=loss_meter,
                                                           accuracy=accuracy))
-        if main_process():
-            writer.add_scalar('loss_train_batch', main_loss_meter.val, current_iter)
-            writer.add_scalar('aux_loss_train_batch', aux_loss_meter.val, current_iter)
-            writer.add_scalar('mIoU_train_batch', np.mean(intersection / (union + 1e-10)), current_iter)
-            writer.add_scalar('mAcc_train_batch', np.mean(intersection / (target + 1e-10)), current_iter)
-            writer.add_scalar('allAcc_train_batch', accuracy, current_iter)
+        # if main_process():
+        writer.add_scalar('loss_train_batch', main_loss_meter.val, current_iter)
+        writer.add_scalar('aux_loss_train_batch', aux_loss_meter.val, current_iter)
+        writer.add_scalar('mIoU_train_batch', np.mean(intersection / (union + 1e-10)), current_iter)
+        writer.add_scalar('mAcc_train_batch', np.mean(intersection / (target + 1e-10)), current_iter)
+        writer.add_scalar('allAcc_train_batch', accuracy, current_iter)
 
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)
@@ -317,16 +276,16 @@ def train(train_loader, model, optimizer, epoch):
     mAcc = np.mean(accuracy_class)
     allAcc = sum(intersection_meter.sum) / (sum(target_meter.sum) + 1e-10)
 
-    if main_process():
-        logger.info('Train result at epoch [{}/{}]: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(epoch, args.epochs, mIoU, mAcc, allAcc))
-        for i in range(args.classes):
-            logger.info('Class_{} Result: iou/accuracy {:.4f}/{:.4f}.'.format(i, iou_class[i], accuracy_class[i]))        
+    # if main_process():
+    logger.info('Train result at epoch [{}/{}]: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(epoch, args.epochs, mIoU, mAcc, allAcc))
+    for i in range(args.classes):
+        logger.info('Class_{} Result: iou/accuracy {:.4f}/{:.4f}.'.format(i, iou_class[i], accuracy_class[i]))
     return main_loss_meter.avg, aux_loss_meter.avg, mIoU, mAcc, allAcc
 
 
 def validate(val_loader, model, criterion):
-    if main_process():
-        logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
+    # if main_process():
+    logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     batch_time = AverageMeter()
     model_time = AverageMeter()
     data_time = AverageMeter()
@@ -401,7 +360,7 @@ def validate(val_loader, model, criterion):
             loss_meter.update(loss.item(), input.size(0))
             batch_time.update(time.time() - end)
             end = time.time()
-            if ((i + 1) % (test_num/100) == 0) and main_process():
+            if ((i + 1) % (test_num/100) == 0) :
                 logger.info('Test: [{}/{}] '
                             'Data {data_time.val:.3f} ({data_time.avg:.3f}) '
                             'Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) '
@@ -431,15 +390,31 @@ def validate(val_loader, model, criterion):
         logger.info('Class_{} Result: iou {:.4f}.'.format(i+1, class_iou_class[i]))            
     
 
-    if main_process():
-        logger.info('FBIoU---Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(mIoU, mAcc, allAcc))
-        for i in range(args.classes):
-            logger.info('Class_{} Result: iou/accuracy {:.4f}/{:.4f}.'.format(i, iou_class[i], accuracy_class[i]))
-        logger.info('<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<')
+    # if main_process():
+    logger.info('FBIoU---Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(mIoU, mAcc, allAcc))
+    for i in range(args.classes):
+        logger.info('Class_{} Result: iou/accuracy {:.4f}/{:.4f}.'.format(i, iou_class[i], accuracy_class[i]))
+    logger.info('<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<')
 
     print('avg inference time: {:.4f}, count: {}'.format(model_time.avg, test_num))
     return loss_meter.avg, mIoU, mAcc, allAcc, class_miou
 
 
 if __name__ == '__main__':
-    main()
+    args = get_parser()
+    assert args.classes > 1
+    assert args.zoom_factor in [1, 2, 4, 8]
+    assert (args.train_h - 1) % 8 == 0 and (args.train_w - 1) % 8 == 0
+    # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.train_gpu)
+    # os.environ["CUDA_VISIBLE_DEVICES"] = args.train_gpu
+    if args.manual_seed is not None:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+        torch.cuda.manual_seed(args.manual_seed)
+        np.random.seed(args.manual_seed)
+        torch.manual_seed(args.manual_seed)
+        torch.cuda.manual_seed_all(args.manual_seed)
+        random.seed(args.manual_seed)
+    # torch.cuda.set_device(device=args.train_gpu)
+    main_worker(args)

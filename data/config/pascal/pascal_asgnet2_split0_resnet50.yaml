@@ -5,7 +5,7 @@ DATA:
   classes: 2
 
 TRAIN:
-  arch: asgnet
+  arch: asgnet2
   layers: 50
   sync_bn: False
   train_h: 473
@@ -19,7 +19,7 @@ TRAIN:
   ignore_label: 255
   padding_label: 255
   aux_weight: 1.0
-  train_gpu: [0]
+#  train_gpu: [2]
   workers: 8  # data loader workers
   batch_size: 4  # batch size for training
   batch_size_val: 1
@@ -32,8 +32,8 @@ TRAIN:
   manual_seed: 321
   print_freq: 5
   save_freq: 20
-  save_path: exp/asgnet_new/pascal/split0_resnet50/model
-  weight: exp/asgnet_new/pascal/split0_resnet50/model/train_epoch_70_0.579445135596944.pth
+  save_path: exp/asgnet2/pascal/split0_resnet50/model
+  weight:
   resume: 
   evaluate: True
   split: 0

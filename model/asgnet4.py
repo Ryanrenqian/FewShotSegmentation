@@ -163,6 +163,9 @@ class Model(nn.Module):
                                          nn.Conv2d(reduce_dim, classes, kernel_size=1))
 
     def forward(self, x, s_x=torch.FloatTensor(1,1,3,473,473).cuda(), s_y=torch.FloatTensor(1,1,473,473).cuda(), s_seed=None, y=None):
+        '''
+        s_y: Batch x Shot x c x w x h
+        '''
         x_size = x.size()
         assert (x_size[2] - 1) % 8 == 0 and (x_size[3] - 1) % 8 == 0
         h = int((x_size[2] - 1) / 8 * self.zoom_factor + 1)
@@ -195,12 +198,14 @@ class Model(nn.Module):
             supp_feat = torch.cat([supp_feat_3, supp_feat_2], 1)
             supp_feat = self.down_conv(supp_feat)
             supp_feat_list.append(supp_feat)  # shot x [bs x 256 x h x w]
-
+        
 ########################### Adaptive Superpixel Clustering ###########################
         bs, _, max_num_sp, _ = s_seed.size()  # bs x shot x max_num_sp x 2
 
         guide_feat_list = []
         prob_map_list = []
+        sup_guide_feat_list = []
+        sup_prob_map_list = []
         for bs_ in range(bs):
             sp_center_list = []
             query_feat_ = query_feat[bs_, :, :, :]  # c x h x w
@@ -229,7 +234,7 @@ class Model(nn.Module):
                         sp_center_list.append(sp_center)
 
             sp_center = torch.cat(sp_center_list, dim=1)   # c x num_sp_all (collected from all shots)
-            sp_center = sp_center * F.softmax(sp_center)
+            sp_center_prb = sp_center * F.softmax(sp_center*sp_center)
 ########################### Guided Prototype Allocation ###########################
             # when support only has one prototype in 1-shot training
             if (self.shot == 1) and (sp_center.size(1) == 1):
@@ -240,20 +245,56 @@ class Model(nn.Module):
                 guide_feat_list.append(guide_feat)
                 continue
 
-            sp_center_rep = sp_center[..., None, None].repeat(1, 1, query_feat_.size(1), query_feat_.size(2))
+            sp_center_rep = sp_center_prb[..., None, None].repeat(1, 1, query_feat_.size(1), query_feat_.size(2))
             cos_sim_map = F.cosine_similarity(sp_center_rep, query_feat_.unsqueeze(1), dim=0, eps=1e-7)  # num_sp x h x w
             prob_map = cos_sim_map.sum(0, keepdim=True)  # 1 x h x w
             prob_map_list.append(prob_map.unsqueeze(0))
-
+        
             guide_map = cos_sim_map.max(0)[1]  # h x w
             sp_guide_feat = sp_center[:, guide_map]  # c x h x w
             guide_feat = torch.cat([query_feat_, sp_guide_feat], dim=0)  # 2c x h x w
             guide_feat_list.append(guide_feat.unsqueeze(0))
-
+            if self.training:
+                for shot_ in range(self.shot):
+                    supp_feat_ = supp_feat_list[shot_][bs_, :, :, :]
+                    cos_sim_map = F.cosine_similarity(sp_center_rep, supp_feat_.unsqueeze(1), dim=0, eps=1e-7)
+                    prob_map = cos_sim_map.sum(0, keepdim=True)
+                    sup_prob_map_list.append(prob_map.unsqueeze(0))
+                    guide_map = cos_sim_map.max(0)[1]  # h x w
+                    sp_guide_feat = sp_center[:, guide_map]  # c x h x w
+                    guide_feat = torch.cat([supp_feat_, sp_guide_feat], dim=0)  # 2c x h x w
+                    sup_guide_feat_list.append(guide_feat.unsqueeze(0))
+                        
         guide_feat = torch.cat(guide_feat_list, dim=0)  # bs x 2c x h x w
         prob_map = torch.cat(prob_map_list, dim=0)      # bs x 1 x h x w
-
+        sup_guide_feat = torch.cat(sup_guide_feat_list, dim=0)
+        sup_prob_map = torch.cat(sup_prob_map_list, dim=0)      # bs x 1 x h x w
+            
 ########################### Context Module ###########################
+        out = self.decoder(guide_feat,prob_map)
+        supout = self.decoder(sup_guide_feat,sup_prob_map)
+        if self.zoom_factor != 1:
+            out = F.interpolate(out, size=(h, w), mode='bilinear', align_corners=True)
+
+        if self.training:
+            main_loss = self.criterion(out, y.long())
+            aux_loss = torch.zeros_like(main_loss).cuda()
+            if self.pyramid:
+                for idx_k in range(len(out_list)):
+                    inner_out = out_list[idx_k]
+                    inner_out = F.interpolate(inner_out, size=(h, w), mode='bilinear', align_corners=True)
+                    aux_loss = aux_loss + self.criterion(inner_out, y.long())
+                aux_loss = aux_loss / len(out_list)
+            else:
+                aux_out = self.cls_aux(final_feat)
+                aux_out = F.interpolate(aux_out, size=(h, w), mode='bilinear', align_corners=True)
+                aux_loss = self.criterion(aux_out, y.long())
+            return out.max(1)[1], main_loss, aux_loss
+        else:
+            return out
+    
+    
+    def decoder(self,guide_feat, prob_map):
         if self.pyramid:
 
             out_list = []
@@ -297,28 +338,8 @@ class Model(nn.Module):
             final_feat = self.ASPP(final_feat)
             decoder_out = self.decoder(final_feat, query_feat_1)
             out = self.cls(decoder_out)
-
-        if self.zoom_factor != 1:
-            out = F.interpolate(out, size=(h, w), mode='bilinear', align_corners=True)
-
-        if self.training:
-            main_loss = self.criterion(out, y.long())
-            aux_loss = torch.zeros_like(main_loss).cuda()
-
-            if self.pyramid:
-                for idx_k in range(len(out_list)):
-                    inner_out = out_list[idx_k]
-                    inner_out = F.interpolate(inner_out, size=(h, w), mode='bilinear', align_corners=True)
-                    aux_loss = aux_loss + self.criterion(inner_out, y.long())
-                aux_loss = aux_loss / len(out_list)
-            else:
-                aux_out = self.cls_aux(final_feat)
-                aux_out = F.interpolate(aux_out, size=(h, w), mode='bilinear', align_corners=True)
-                aux_loss = self.criterion(aux_out, y.long())
-
-            return out.max(1)[1], main_loss, aux_loss
-        else:
-            return out
+        return out
+        
 
     def sp_center_iter(self, supp_feat, supp_mask, sp_init_center, n_iter):
         '''
@@ -347,7 +368,8 @@ class Model(nn.Module):
             else:
                 sp_center_rep = sp_center.unsqueeze(1).repeat(1, num_roi, 1)
             assert supp_feat_roi_rep.shape == sp_center_rep.shape  # (C + xy) x num_roi x num_sp
-            dist = torch.pow(supp_feat_roi_rep - sp_center_rep, 2.0)
+            dist = F.cosine_similarity(supp_feat_roi_rep,sp_center_rep)
+            # dist = torch.pow(supp_feat_roi_rep - sp_center_rep, 2.0)
             feat_dist = dist[:-2, :, :].sum(0)
             spat_dist = dist[-2:, :, :].sum(0)
             total_dist = torch.pow(feat_dist + spat_dist / 100, 0.5)
