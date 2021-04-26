@@ -19,8 +19,8 @@ TRAIN:
   ignore_label: 255
   padding_label: 255
   aux_weight: 1.0
+  emk: 4
   train_gpu: [0]
-  emk: 1
   workers: 8  # data loader workers
   batch_size: 4  # batch size for training
   batch_size_val: 1
@@ -33,11 +33,11 @@ TRAIN:
   manual_seed: 321
   print_freq: 5
   save_freq: 20
-  save_path: exp/pfenetaux/pascal/split2_resnet50/model
+  save_path: exp/pfenetaux/pascal/split1_resnet50_k4/model
   weight: 
   resume: 
   evaluate: True
-  split: 2
+  split: 1
   shot: 1
   max_sp: 5
   train_iter: 10

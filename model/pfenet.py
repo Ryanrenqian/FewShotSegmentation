@@ -88,8 +88,6 @@ class Model(nn.Module):
                     nn.AdaptiveAvgPool2d(bin)
                 )
 
-
-        factor = 1
         mask_add_num = 1
         self.init_merge = []
         self.beta_conv = []

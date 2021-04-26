@@ -37,7 +37,7 @@ TRAIN:
   weight: 
   resume: 
   evaluate: True
-  split: 2
+  split: 3
   shot: 1
   max_sp: 5
   train_iter: 10

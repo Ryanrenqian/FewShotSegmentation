@@ -35,7 +35,7 @@ class Model(nn.Module):
         assert layers in [50, 101, 152]
 
         self.ppm_scales = args.ppm_scales
-        self.EM_k = args.emk
+
         models.BatchNorm = BatchNorm
         
 
@@ -178,13 +178,10 @@ class Model(nn.Module):
             supp_feat = self.down_supp(supp_feat)
             supp_feat_v = Weighted_GAP(supp_feat, mask)
             # 计算sup上的相似率
-            # print(supp_feat.size(),supp_feat_v.size())
-            for i in range(self.EM_k):
-                probs = F.cosine_similarity(supp_feat,supp_feat_v,dim=1).unsqueeze(1)
-                aux_probs = (1-probs) * mask
-#                 print(aux_probs.size(),probs.size(),mask.size())
-                aux_feat_v = Weighted_GAP(supp_feat,aux_probs)
-                supp_feat_v = Weighted_GAP(supp_feat,probs)
+            probs = F.cosine_similarity(supp_feat,supp_feat_v,dim=1)
+            aux_probs = (1-probs)*mask
+
+            aux_feat_v = Weighted_GAP(supp_feat,probs.unsqueeze(1))
             supp_feat_list.append(supp_feat_v)
             aux_feat_list.append(aux_feat_v)
 

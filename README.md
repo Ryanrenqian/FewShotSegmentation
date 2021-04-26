@@ -1,10 +1,3 @@
-# ASGNet
-The code is for the paper "Adaptive Prototype Learning and Allocation for Few-Shot Segmentation" (accepted to CVPR 2021) [[arxiv](https://arxiv.org/abs/2104.01893)]
-
-<p align="left">
-  <img src="figure/comparison.png" width="511.4" height="400">
-</p>
-
 ## Overview
 + `data/` includes config files and train/validation list files
 + `model/` includes related model and module
@@ -29,20 +22,11 @@ Prepare related datasets: Pascal-5<sup>i</sup> ([VOC 2012](http://host.robots.ox
   sh tool/test.sh|train.sh {data} {model} {split_backbone}
   ```
 
-E.g. Test ASGNet with ResNet50 on the split 0 of PASCAL-5i:
+E.g. Test modelwith ResNet50 on the split 0 of PASCAL-5i:
 ```
 sh tool/test.sh pascal asgnet split0_resnet50
 ```
 
-## Citation
-Please consider citing the paper if you find it useful:
-```
-@inproceedings{li2021AdaptivePL,
-  title={Adaptive Prototype Learning and Allocation for Few-Shot Segmentation},
-  author={Gen Li and Varun Jampani and Laura Sevilla-Lara and Deqing Sun and Jonghyun Kim and Joongkyu Kim},
-  booktitle={CVPR},
-  year={2021}
-}
-```
+
 ## References
 The code is based on [semseg](https://github.com/hszhao/semseg) and [PFENet](https://github.com/Jia-Research-Lab/PFENet). Thanks for their great work!
