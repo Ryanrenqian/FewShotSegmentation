@@ -160,7 +160,7 @@ class Model(nn.Module):
         pri_proto_list = []
         aux_proto_list = []
         final_supp_list = []
-        # supp_feat_list = []
+        supp_feat_list = []
         mask_list = []
         for i in range(self.shot):
             mask = (s_y[:,i,:,:] == 1).float().unsqueeze(1)
@@ -177,9 +177,9 @@ class Model(nn.Module):
             supp_feat = torch.cat([supp_feat_3, supp_feat_2], 1)
             supp_feat = self.down_supp(supp_feat)
             supp_feat_v = Weighted_GAP(supp_feat, mask)
-            # supp_feat_list.appned(supp_feat_v)
+            supp_feat_list.appned(supp_feat_v)
             # 计算sup上的相似率
-            # print(supp_feat.size(),supp_feat_v.size())
+
             for i in range(self.EM_k):
                 probs = F.cosine_similarity(supp_feat,supp_feat_v,dim=1).unsqueeze(1)
                 aux_probs = (1-probs) * mask
@@ -195,16 +195,21 @@ class Model(nn.Module):
         if self.shot > 1:
             pri_proto = pri_proto_list[0]
             aux_proto = aux_proto_list[0]
-            # channel_att = supp_feat_list[0]
+            channel_att = supp_feat_list[0]
             for i in range(1, len(pri_proto_list)):
                 pri_proto += pri_proto_list[i]
                 aux_proto += aux_proto_list[i]
-                # channel_att = supp_feat_list[i]
+                channel_att = supp_feat_list[i]
             pri_proto /= len(pri_proto_list)
             aux_proto /= len(aux_proto_list)
+            channel_att /= len(supp_feat_list)
         else:
             pri_proto = pri_proto_list[0]
             aux_proto = aux_proto_list[0]
+        channel_att = F.softmax(channel_att*channel_att)
+        corr_query_mask = corr_query_mask * channel_att
+        pri_proto = pri_proto * channel_att
+        aux_proto = pri_proto * channel_att
 
         out,out_list = self.decoder(corr_query_mask,[pri_proto,aux_proto],query_feat)
 

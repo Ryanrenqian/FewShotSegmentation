@@ -35,7 +35,7 @@ class Model(nn.Module):
         assert layers in [50, 101, 152]
 
         self.ppm_scales = args.ppm_scales
-
+        self.EM_k = args.emk
         models.BatchNorm = BatchNorm
         
 
@@ -157,9 +157,10 @@ class Model(nn.Module):
         query_feat = self.down_query(query_feat)
 
         #   Support Feature     
-        supp_feat_list = []
-        aux_feat_list = []
+        pri_proto_list = []
+        aux_proto_list = []
         final_supp_list = []
+        # supp_feat_list = []
         mask_list = []
         for i in range(self.shot):
             mask = (s_y[:,i,:,:] == 1).float().unsqueeze(1)
@@ -170,59 +171,116 @@ class Model(nn.Module):
                 supp_feat_2 = self.layer2(supp_feat_1)
                 supp_feat_3 = self.layer3(supp_feat_2)
                 mask = F.interpolate(mask, size=(supp_feat_3.size(2), supp_feat_3.size(3)), mode='bilinear', align_corners=True)
-                supp_feat_4 = self.layer4(supp_feat_3*mask)
-                final_supp_list.append(supp_feat_4)
+                final_supp_feat_4 = self.layer4(supp_feat_3*mask)
+                final_supp_list.append(final_supp_feat_4)
 
-            
             supp_feat = torch.cat([supp_feat_3, supp_feat_2], 1)
             supp_feat = self.down_supp(supp_feat)
             supp_feat_v = Weighted_GAP(supp_feat, mask)
+            # supp_feat_list.appned(supp_feat_v)
             # 计算sup上的相似率
-            probs = F.cosine_similarity(supp_feat,supp_feat_v,dim=1)
-            aux_probs = (1-probs)*mask
+            # print(supp_feat.size(),supp_feat_v.size())
+            for i in range(self.EM_k):
+                probs = F.cosine_similarity(supp_feat,supp_feat_v,dim=1).unsqueeze(1)
+                aux_probs = (1-probs) * mask
+                aux_feat_v = Weighted_GAP(supp_feat,aux_probs)
+                supp_feat_v = Weighted_GAP(supp_feat,probs)
+            pri_proto_list.append(supp_feat_v)
+            aux_proto_list.append(aux_feat_v)
 
-            aux_feat_v = Weighted_GAP(supp_feat,probs.unsqueeze(1))
-            supp_feat_list.append(supp_feat_v)
-            aux_feat_list.append(aux_feat_v)
+        # prior mask
+        corr_query_mask = self.priormask(final_supp_list,mask_list,query_feat_4,query_feat_3,query_feat)
 
+        if self.shot > 1:
+            pri_proto = pri_proto_list[0]
+            aux_proto = aux_proto_list[0]
+            # channel_att = supp_feat_list[0]
+            for i in range(1, len(pri_proto_list)):
+                pri_proto += pri_proto_list[i]
+                aux_proto += aux_proto_list[i]
+                # channel_att = supp_feat_list[i]
+            pri_proto /= len(pri_proto_list)
+            aux_proto /= len(aux_proto_list)
+        else:
+            pri_proto = pri_proto_list[0]
+            aux_proto = aux_proto_list[0]
 
+        out,out_list = self.decoder(corr_query_mask,[pri_proto,aux_proto],query_feat)
+
+        #   Output Part
+        if self.zoom_factor != 1:
+            out = F.interpolate(out, size=(h, w), mode='bilinear', align_corners=True)
+
+        if self.training:
+            # calculate query
+            main_loss = self.criterion(out, y.long())
+            aux_loss = torch.zeros_like(main_loss).cuda()
+
+            for idx_k in range(len(out_list)):    
+                inner_out = out_list[idx_k]
+                inner_out = F.interpolate(inner_out, size=(h, w), mode='bilinear', align_corners=True)
+                aux_loss = aux_loss + self.criterion(inner_out, y.long())   
+            aux_loss = aux_loss / len(out_list)
+
+            return out.max(1)[1], main_loss, aux_loss
+        else:
+            return out
+
+    def priormask(self,final_supp_list,supp_mask_list,query_feat_4,query_feat_3,query_feat):
+        '''
+
+        Args:
+            final_supp_list:
+            supp_mask_list:
+            query_feat_4:
+
+        Returns:
+
+        '''
         corr_query_mask_list = []
         cosine_eps = 1e-7
         for i, tmp_supp_feat in enumerate(final_supp_list):
             resize_size = tmp_supp_feat.size(2)
-            tmp_mask = F.interpolate(mask_list[i], size=(resize_size, resize_size), mode='bilinear', align_corners=True)
+            tmp_mask = F.interpolate(supp_mask_list[i], size=(resize_size, resize_size), mode='bilinear', align_corners=True)
 
-            tmp_supp_feat_4 = tmp_supp_feat * tmp_mask                    
+            tmp_supp_feat_4 = tmp_supp_feat * tmp_mask
             q = query_feat_4
             s = tmp_supp_feat_4
             bsize, ch_sz, sp_sz, _ = q.size()[:]
 
             tmp_query = q
             tmp_query = tmp_query.contiguous().view(bsize, ch_sz, -1)
-            tmp_query_norm = torch.norm(tmp_query, 2, 1, True) 
+            tmp_query_norm = torch.norm(tmp_query, 2, 1, True)
 
-            tmp_supp = s               
-            tmp_supp = tmp_supp.contiguous().view(bsize, ch_sz, -1) 
-            tmp_supp = tmp_supp.contiguous().permute(0, 2, 1) 
-            tmp_supp_norm = torch.norm(tmp_supp, 2, 2, True) 
+            tmp_supp = s
+            tmp_supp = tmp_supp.contiguous().view(bsize, ch_sz, -1)
+            tmp_supp = tmp_supp.contiguous().permute(0, 2, 1)
+            tmp_supp_norm = torch.norm(tmp_supp, 2, 2, True)
 
-            similarity = torch.bmm(tmp_supp, tmp_query)/(torch.bmm(tmp_supp_norm, tmp_query_norm) + cosine_eps)   
-            similarity = similarity.max(1)[0].view(bsize, sp_sz*sp_sz)   
-            similarity = (similarity - similarity.min(1)[0].unsqueeze(1))/(similarity.max(1)[0].unsqueeze(1) - similarity.min(1)[0].unsqueeze(1) + cosine_eps)
+            similarity = torch.bmm(tmp_supp, tmp_query) / (torch.bmm(tmp_supp_norm, tmp_query_norm) + cosine_eps)
+            similarity = similarity.max(1)[0].view(bsize, sp_sz * sp_sz)
+            similarity = (similarity - similarity.min(1)[0].unsqueeze(1)) / (
+                        similarity.max(1)[0].unsqueeze(1) - similarity.min(1)[0].unsqueeze(1) + cosine_eps)
             corr_query = similarity.view(bsize, 1, sp_sz, sp_sz)
-            corr_query = F.interpolate(corr_query, size=(query_feat_3.size()[2], query_feat_3.size()[3]), mode='bilinear', align_corners=True)
-            corr_query_mask_list.append(corr_query)  
-        corr_query_mask = torch.cat(corr_query_mask_list, 1).mean(1).unsqueeze(1)     
-        corr_query_mask = F.interpolate(corr_query_mask, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear', align_corners=True)  
+            corr_query = F.interpolate(corr_query, size=(query_feat_3.size()[2], query_feat_3.size()[3]),
+                                       mode='bilinear', align_corners=True)
+            corr_query_mask_list.append(corr_query)
+        corr_query_mask = torch.cat(corr_query_mask_list, 1).mean(1).unsqueeze(1)
+        corr_query_mask = F.interpolate(corr_query_mask, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
+                                        align_corners=True)
+        return corr_query_mask
 
-        if self.shot > 1:
-            supp_feat_v = supp_feat_list[0]
-            aux_feat_v = aux_feat_list[0]
-            for i in range(1, len(supp_feat_list)):
-                supp_feat_v += supp_feat_list[i]
-                aux_feat_v += aux_feat_list[0]
-            supp_feat_v /= len(supp_feat_list)
-            aux_feat_v /= len(aux_feat_list)
+    def decoder(self,corr_query_mask: torch.Tensor,prototypes: list, query_feat:torch.Tensor):
+        '''
+
+        Args:
+            corr_query_mask:
+            prototype:
+            query_feat:
+
+        Returns:
+
+        '''
         out_list = []
         pyramid_feat_list = []
 
@@ -233,46 +291,29 @@ class Model(nn.Module):
             else:
                 bin = tmp_bin
                 query_feat_bin = self.avgpool_list[idx](query_feat)
-            supp_feat_bin = supp_feat_v.expand(-1, -1, bin, bin)
-            aux_feat_bin = aux_feat_v.expand(-1,-1,bin,bin)
+            proto_feat_bin = torch.cat([proto.expand(-1, -1, bin, bin) for proto in prototypes],dim=1)
             corr_mask_bin = F.interpolate(corr_query_mask, size=(bin, bin), mode='bilinear', align_corners=True)
-            merge_feat_bin = torch.cat([query_feat_bin, supp_feat_bin, aux_feat_bin,corr_mask_bin], 1)
+            merge_feat_bin = torch.cat([query_feat_bin, proto_feat_bin, corr_mask_bin], 1)
             merge_feat_bin = self.init_merge[idx](merge_feat_bin)
 
             if idx >= 1:
-                pre_feat_bin = pyramid_feat_list[idx-1].clone()
+                pre_feat_bin = pyramid_feat_list[idx - 1].clone()
                 pre_feat_bin = F.interpolate(pre_feat_bin, size=(bin, bin), mode='bilinear', align_corners=True)
                 rec_feat_bin = torch.cat([merge_feat_bin, pre_feat_bin], 1)
-                merge_feat_bin = self.alpha_conv[idx-1](rec_feat_bin) + merge_feat_bin  
+                merge_feat_bin = self.alpha_conv[idx - 1](rec_feat_bin) + merge_feat_bin
 
-            merge_feat_bin = self.beta_conv[idx](merge_feat_bin) + merge_feat_bin   
+            merge_feat_bin = self.beta_conv[idx](merge_feat_bin) + merge_feat_bin
             inner_out_bin = self.inner_cls[idx](merge_feat_bin)
-            merge_feat_bin = F.interpolate(merge_feat_bin, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear', align_corners=True)
+            merge_feat_bin = F.interpolate(merge_feat_bin, size=(query_feat.size(2), query_feat.size(3)),
+                                           mode='bilinear', align_corners=True)
             pyramid_feat_list.append(merge_feat_bin)
             out_list.append(inner_out_bin)
-                 
+
         query_feat = torch.cat(pyramid_feat_list, 1)
         query_feat = self.res1(query_feat)
-        query_feat = self.res2(query_feat) + query_feat           
+        query_feat = self.res2(query_feat) + query_feat
         out = self.cls(query_feat)
-        
-
-        #   Output Part
-        if self.zoom_factor != 1:
-            out = F.interpolate(out, size=(h, w), mode='bilinear', align_corners=True)
-
-        if self.training:
-            main_loss = self.criterion(out, y.long())
-            aux_loss = torch.zeros_like(main_loss).cuda()    
-
-            for idx_k in range(len(out_list)):    
-                inner_out = out_list[idx_k]
-                inner_out = F.interpolate(inner_out, size=(h, w), mode='bilinear', align_corners=True)
-                aux_loss = aux_loss + self.criterion(inner_out, y.long())   
-            aux_loss = aux_loss / len(out_list)
-            return out.max(1)[1], main_loss, aux_loss
-        else:
-            return out
+        return out,out_list
 
     def _optimizer(self, args):
         optimizer = torch.optim.SGD(

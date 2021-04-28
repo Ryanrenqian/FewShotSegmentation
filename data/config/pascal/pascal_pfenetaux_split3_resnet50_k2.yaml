@@ -1,7 +1,7 @@
 DATA:
-  data_root: '/root/workspace/fewshot_segmentation/PFENet/data/VOC2012'
-  train_list: '/root/workspace/fewshot_segmentation/PFENet/lists/pascal/voc_sbd_merge_noduplicate.txt'
-  val_list: '/root/workspace/fewshot_segmentation/PFENet/lists/pascal/val.txt'
+  data_root: './data/data/VOC2012'
+  train_list: './data/lists/pascal/voc_sbd_merge_noduplicate.txt'
+  val_list: './data/lists/pascal/val.txt'
   classes: 2
 
 TRAIN:
@@ -33,7 +33,7 @@ TRAIN:
   manual_seed: 321
   print_freq: 5
   save_freq: 20
-  save_path: exp/pfenetaux/pascal/split2_resnet50_k2/model
+  save_path: exp/pfenetaux/pascal/split3_resnet50_k2/model
   weight: 
   resume: 
   evaluate: True

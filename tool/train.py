@@ -162,8 +162,8 @@ def main_worker(argss):
         writer.add_scalar('mAcc_train', mAcc_train, epoch_log)
         writer.add_scalar('allAcc_train', allAcc_train, epoch_log)
 
-        if args.evaluate and (epoch % 2 == 0 or (args.epochs<=50 and epoch%1==0)):
-            loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, criterion)
+        if args.evaluate and (epoch % 2 == 0 or (epoch<=70 and epoch%1==0)):
+            loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou,class_iou_class = validate(val_loader, model, criterion)
             # if main_process():
             writer.add_scalar('loss_val', loss_val, epoch_log)
             writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
@@ -172,6 +172,7 @@ def main_worker(argss):
             writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
             if class_miou > max_iou:
                 max_iou = class_miou
+                max_class_iou_class = class_iou_class
                 if os.path.exists(filename):
                     os.remove(filename)            
                 filename = args.save_path + '/train_epoch_' + str(epoch) + '_'+str(max_iou)+'.pth'
@@ -180,7 +181,11 @@ def main_worker(argss):
 
     filename = args.save_path + '/final.pth'
     logger.info('Saving checkpoint to: ' + filename)
-    torch.save({'epoch': args.epochs, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}, filename)                
+    torch.save({'epoch': args.epochs, 'state_dict': model.state_dict(), 'optimizer': optimizer.state_dict()}, filename)
+    logger.info('Best mIOU: : ' +str(max_iou))
+    for i in range(len(max_class_iou_class)):
+        logger.info('Class_{} Result: iou {:.4f}.'.format(i + 1, max_class_iou_class[i]))
+
 
 
 def train(train_loader, model, optimizer, epoch):
@@ -196,6 +201,7 @@ def train(train_loader, model, optimizer, epoch):
     model.train()
     end = time.time()
     max_iter = args.epochs * len(train_loader)
+    best_iou = 0
     vis_key = 0
     print('Warmup: {}'.format(args.warmup))
     for i, (input, target, s_input, s_mask, s_init_seed, subcls) in enumerate(train_loader):
@@ -397,7 +403,7 @@ def validate(val_loader, model, criterion):
     logger.info('<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<')
 
     print('avg inference time: {:.4f}, count: {}'.format(model_time.avg, test_num))
-    return loss_meter.avg, mIoU, mAcc, allAcc, class_miou
+    return loss_meter.avg, mIoU, mAcc, allAcc, class_miou,class_iou_class
 
 
 if __name__ == '__main__':

@@ -6,8 +6,8 @@ import numpy as np
 import logging
 import argparse
 
-os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-os.environ["CUDA_VISIBLE_DEVICES"] = '0'
+# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+# os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 import torch
 import torch.backends.cudnn as cudnn
@@ -55,40 +55,41 @@ def worker_init_fn(worker_id):
     random.seed(args.manual_seed + worker_id)
 
 
-def main_process():
-    return not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % args.ngpus_per_node == 0)
+# def main_process():
+#     return not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % args.ngpus_per_node == 0)
 
 
-def main():
-    args = get_parser()
-    assert args.classes > 1
-    assert args.zoom_factor in [1, 2, 4, 8]
-    assert (args.train_h - 1) % 8 == 0 and (args.train_w - 1) % 8 == 0
-    os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.train_gpu)
-    if args.manual_seed is not None:
-        cudnn.benchmark = False
-        cudnn.deterministic = True
-        torch.cuda.manual_seed(args.manual_seed)
-        np.random.seed(args.manual_seed)
-        torch.manual_seed(args.manual_seed)
-        torch.cuda.manual_seed_all(args.manual_seed)
-        random.seed(args.manual_seed)
-    if args.dist_url == "env://" and args.world_size == -1:
-        args.world_size = int(os.environ["WORLD_SIZE"])
-    args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-    args.ngpus_per_node = len(args.train_gpu)
-    if len(args.train_gpu) == 1:
-        args.sync_bn = False
-        args.distributed = False
-        args.multiprocessing_distributed = False
-    if args.multiprocessing_distributed:
-        args.world_size = args.ngpus_per_node * args.world_size
-        mp.spawn(main_worker, nprocs=args.ngpus_per_node, args=(args.ngpus_per_node, args))
-    else:
-        main_worker(args.train_gpu, args.ngpus_per_node, args)
+# def main():
+#     args = get_parser()
+#     assert args.classes > 1
+#     assert args.zoom_factor in [1, 2, 4, 8]
+#     assert (args.train_h - 1) % 8 == 0 and (args.train_w - 1) % 8 == 0
+#     os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.train_gpu)
+#     if args.manual_seed is not None:
+#         cudnn.benchmark = False
+#         cudnn.deterministic = True
+#         torch.cuda.manual_seed(args.manual_seed)
+#         np.random.seed(args.manual_seed)
+#         torch.manual_seed(args.manual_seed)
+#         torch.cuda.manual_seed_all(args.manual_seed)
+#         random.seed(args.manual_seed)
+#     if args.dist_url == "env://" and args.world_size == -1:
+#         args.world_size = int(os.environ["WORLD_SIZE"])
+#     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
+#     args.ngpus_per_node = len(args.train_gpu)
+#     if len(args.train_gpu) == 1:
+#         args.sync_bn = False
+#         args.distributed = False
+#         args.multiprocessing_distributed = False
+#     if args.multiprocessing_distributed:
+#         args.world_size = args.ngpus_per_node * args.world_size
+#         mp.spawn(main_worker, nprocs=args.ngpus_per_node, args=(args.ngpus_per_node, args))
+#     else:
+#         main_worker(args.train_gpu, args.ngpus_per_node, args)
 
 
-def main_worker(gpu, ngpus_per_node, argss):
+# def main_worker(gpu, ngpus_per_node, argss):
+def main_worker(argss):
     global args
     args = argss
 
@@ -97,6 +98,16 @@ def main_worker(gpu, ngpus_per_node, argss):
     criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label)
 
     model = eval(args.arch).Model(args)
+    for param in model.layer0.parameters():
+        param.requires_grad = False
+    for param in model.layer1.parameters():
+        param.requires_grad = False
+    for param in model.layer2.parameters():
+        param.requires_grad = False
+    for param in model.layer3.parameters():
+        param.requires_grad = False
+    for param in model.layer4.parameters():
+        param.requires_grad = False
 
     global logger, writer
     logger = get_logger()
@@ -107,6 +118,8 @@ def main_worker(gpu, ngpus_per_node, argss):
     print(args)
 
     model = torch.nn.DataParallel(model.cuda(), device_ids=[0])
+
+    imgs_path = os.path.join(args.save_path), '../prediction/')
 
     if args.weight:
         if os.path.isfile(args.weight):
@@ -144,8 +157,8 @@ def main_worker(gpu, ngpus_per_node, argss):
     loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, criterion, args)
 
 def validate(val_loader, model, criterion, args):
-    if main_process():
-        logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
+    # if main_process():
+    #     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     batch_time = AverageMeter()
     model_time = AverageMeter()
     data_time = AverageMeter()
@@ -209,6 +222,8 @@ def validate(val_loader, model, criterion, args):
 
             intersection, union, new_target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
             intersection, union, target, new_target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy(), new_target.cpu().numpy()
+
+
             intersection_meter.update(intersection), union_meter.update(union), target_meter.update(new_target)
 
             subcls = subcls[0].cpu().numpy()[0]
@@ -219,7 +234,7 @@ def validate(val_loader, model, criterion, args):
             loss_meter.update(loss.item(), input.size(0))
             batch_time.update(time.time() - end)
             end = time.time()
-            if ((i + 1) % (test_num/100) == 0) and main_process():
+            if ((i + 1) % (test_num/100) == 0):
                 logger.info('Test: [{}/{}] '
                             'Data {data_time.val:.3f} ({data_time.avg:.3f}) '
                             'Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) '
@@ -249,15 +264,28 @@ def validate(val_loader, model, criterion, args):
         logger.info('Class_{} Result: iou {:.4f}.'.format(i+1, class_iou_class[i]))
 
 
-    if main_process():
-        logger.info('FBIoU---Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(mIoU, mAcc, allAcc))
-        for i in range(args.classes):
-            logger.info('Class_{} Result: iou/accuracy {:.4f}/{:.4f}.'.format(i, iou_class[i], accuracy_class[i]))
-        logger.info('<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<')
+
+    logger.info('FBIoU---Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(mIoU, mAcc, allAcc))
+    for i in range(args.classes):
+        logger.info('Class_{} Result: iou/accuracy {:.4f}/{:.4f}.'.format(i, iou_class[i], accuracy_class[i]))
+    logger.info('<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<')
 
     print('avg inference time: {:.4f}, count: {}'.format(model_time.avg, test_num))
     return loss_meter.avg, mIoU, mAcc, allAcc, class_miou
 
 
 if __name__ == '__main__':
-    main()
+    args = get_parser()
+    assert args.classes > 1
+    assert args.zoom_factor in [1, 2, 4, 8]
+    assert (args.train_h - 1) % 8 == 0 and (args.train_w - 1) % 8 == 0
+    if args.manual_seed is not None:
+        cudnn.benchmark = False
+        cudnn.deterministic = True
+        torch.cuda.manual_seed(args.manual_seed)
+        np.random.seed(args.manual_seed)
+        torch.manual_seed(args.manual_seed)
+        torch.cuda.manual_seed_all(args.manual_seed)
+        random.seed(args.manual_seed)
+    # torch.cuda.set_device(device=args.train_gpu)
+    main_worker(args)
