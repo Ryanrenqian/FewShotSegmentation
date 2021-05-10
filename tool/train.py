@@ -213,15 +213,24 @@ def train(train_loader, model, optimizer, epoch):
 
         s_input = s_input.cuda(non_blocking=True)
         s_mask = s_mask.cuda(non_blocking=True)
+        s_mask =  torch.where(s_mask==1, s_mask,torch.zeros_like(s_mask))
         input = input.cuda(non_blocking=True)
         target = target.cuda(non_blocking=True)
+        target = torch.where(target==1, target,torch.zeros_like(target))
         s_init_seed = s_init_seed.cuda(non_blocking=True)
         
         output, main_loss, aux_loss = model(s_x=s_input, s_y=s_mask, x=input, y=target, s_seed=s_init_seed)
-
+        # segment background
+        # s_bg = torch.ones_like(s_mask) - s_mask
+        # bg_target = torch.ones_like(target) - target
+        # s_bg = s_bg.cuda(non_blocking=True)
+        # bg_target = bg_target.cuda(non_blocking=True)
+        # _, main_loss_bg, aux_loss_bg = model(s_x=s_input, s_y=s_bg, x=input, y=bg_target, s_seed=s_init_seed)
         # if not args.multiprocessing_distributed:
         main_loss, aux_loss = torch.mean(main_loss), torch.mean(aux_loss)
-        loss = main_loss + args.aux_weight * aux_loss
+        # main_loss_bg, aux_loss_bg = torch.mean(main_loss_bg),torch.mean(aux_loss_bg)
+        loss = main_loss  + args.aux_weight * aux_loss
+        # loss = loss + main_loss_bg + args.aux_weight * aux_loss_bg
         optimizer.zero_grad()
 
         loss.backward()
@@ -330,25 +339,22 @@ def validate(val_loader, model, criterion):
         for i, (input, target, s_input, s_mask, s_init_seed, subcls, ori_label) in enumerate(val_loader):
             if (iter_num-1) * args.batch_size_val >= test_num:
                 break
-            iter_num += 1    
+            iter_num += 1
             data_time.update(time.time() - end)
+            # segment foreground
             input = input.cuda(non_blocking=True)
             target = target.cuda(non_blocking=True)
             ori_label = ori_label.cuda(non_blocking=True)
             start_time = time.time()
             output = model(s_x=s_input, s_y=s_mask, x=input, y=target, s_seed=s_init_seed)
-            total_time = total_time + 1
-            model_time.update(time.time() - start_time)
 
-            if args.ori_resize:
-                longerside = max(ori_label.size(1), ori_label.size(2))
-                backmask = torch.ones(ori_label.size(0), longerside, longerside).cuda()*255
-                backmask[0, :ori_label.size(1), :ori_label.size(2)] = ori_label
-                target = backmask.clone().long()
 
             output = F.interpolate(output, size=target.size()[1:], mode='bilinear', align_corners=True)         
             loss = criterion(output, target)    
 
+            total_time = total_time + 1
+            model_time.update(time.time() - start_time)
+            #
             n = input.size(0)
             loss = torch.mean(loss)
 

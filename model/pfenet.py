@@ -212,6 +212,7 @@ class Model(nn.Module):
                 supp_feat += supp_feat_list[i]
             supp_feat /= len(supp_feat_list)
         out,out_list = self.decoder(corr_query_mask,supp_feat,query_feat)
+        # refine query mask:
 
         
 

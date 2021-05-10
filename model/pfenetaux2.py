@@ -14,7 +14,6 @@ def Weighted_GAP(supp_feat, mask):
     supp_feat = supp_feat * mask
     feat_h, feat_w = supp_feat.shape[-2:][0], supp_feat.shape[-2:][1]
     area = F.avg_pool2d(mask, (supp_feat.size()[2], supp_feat.size()[3])) * feat_h * feat_w + 0.0005
-    # area = torch.sum(mask,dim=1)+0.0005
     supp_feat = F.avg_pool2d(input=supp_feat, kernel_size=supp_feat.shape[-2:]) * feat_h * feat_w / area  
     return supp_feat
   
@@ -97,7 +96,7 @@ class Model(nn.Module):
         self.inner_cls = []        
         for bin in self.pyramid_bins:
             self.init_merge.append(nn.Sequential(
-                nn.Conv2d(reduce_dim*3 + mask_add_num, reduce_dim, kernel_size=1, padding=0, bias=False),
+                nn.Conv2d(reduce_dim*2 + mask_add_num, reduce_dim, kernel_size=1, padding=0, bias=False),
                 nn.ReLU(inplace=True),
             ))                      
             self.beta_conv.append(nn.Sequential(
@@ -181,43 +180,35 @@ class Model(nn.Module):
             # supp_feat_list.appned(supp_feat_v)
             # 计算sup上的相似率
             # print(supp_feat.size(),supp_feat_v.size())
+            probs = torch.zeros_like(mask)
             for i in range(self.EM_k):
-                probs = F.cosine_similarity(supp_feat,supp_feat_v,dim=1).unsqueeze(1)
-                aux_probs = (1-probs) * mask
-                aux_feat_v = Weighted_GAP(supp_feat,aux_probs)
-                supp_feat_v = Weighted_GAP(supp_feat,probs)
-            pri_proto_list.append(supp_feat_v)
-            aux_proto_list.append(aux_feat_v)
+                probs = probs + F.cosine_similarity(supp_feat,supp_feat_v,dim=1).unsqueeze(1)
+                res_probs = (1-probs) * mask
+                aux_feat_v = Weighted_GAP(supp_feat,res_probs)
+                pri_proto_list.append(aux_feat_v)
 
         # prior mask
         corr_query_mask = self.priormask(final_supp_list,mask_list,query_feat_4,query_feat_3,query_feat)
 
-        if self.shot > 1:
-            pri_proto = pri_proto_list[0]
-            aux_proto = aux_proto_list[0]
-            # channel_att = supp_feat_list[0]
-            for i in range(1, len(pri_proto_list)):
-                pri_proto += pri_proto_list[i]
-                aux_proto += aux_proto_list[i]
-                # channel_att = supp_feat_list[i]
-            pri_proto /= len(pri_proto_list)
-            aux_proto /= len(aux_proto_list)
-        else:
-            pri_proto = pri_proto_list[0]
-            aux_proto = aux_proto_list[0]
+        # if self.shot > 1:
+        #     pri_proto = pri_proto_list[0]
+        #     aux_proto = aux_proto_list[0]
+        #     # channel_att = supp_feat_list[0]
+        #     for i in range(1, len(pri_proto_list)):
+        #         pri_proto += pri_proto_list[i]
+        #         aux_proto += aux_proto_list[i]
+        #         # channel_att = supp_feat_list[i]
+        #     pri_proto /= len(pri_proto_list)
+        #     aux_proto /= len(aux_proto_list)
+        # else:
+        #     pri_proto = pri_proto_list[0]
+        #     aux_proto = aux_proto_list[0]
 
-        out,out_list = self.decoder(corr_query_mask,[pri_proto,aux_proto],query_feat)
-        out_list.append(out)
+        out,out_list = self.decoder(corr_query_mask,pri_proto_list,query_feat)
 
         #   Output Part
-
-        out = F.interpolate(out, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear', align_corners=True)
-        mask = out.max(1)[1].unsqueeze(1).float()
-        pri_proto = Weighted_GAP(query_feat,mask)
-        out, out_list2 = self.decoder(mask, [pri_proto,pri_proto], query_feat)
         if self.zoom_factor != 1:
             out = F.interpolate(out, size=(h, w), mode='bilinear', align_corners=True)
-        out_list += out_list2
 
         if self.training:
             # calculate query
@@ -291,7 +282,7 @@ class Model(nn.Module):
         '''
         out_list = []
         pyramid_feat_list = []
-
+        bs = query_feat.size()[0]
         for idx, tmp_bin in enumerate(self.pyramid_bins):
             if tmp_bin <= 1.0:
                 bin = int(query_feat.shape[2] * tmp_bin)
@@ -299,11 +290,22 @@ class Model(nn.Module):
             else:
                 bin = tmp_bin
                 query_feat_bin = self.avgpool_list[idx](query_feat)
-            proto_feat_bin = torch.cat([proto.expand(-1, -1, bin, bin) for proto in prototypes],dim=1)
+            # proto assignment and feat merge
+            proto_feat = torch.cat(prototypes,dim=2).squeeze(-1) #b x c x emk*shot
+            # print(proto_feat.size(),query_feat_bin.size())
+
+            cos_sim_map = torch.cat([F.cosine_similarity(proto, query_feat_bin, dim=1, eps=1e-7).unsqueeze(1) for proto in prototypes],dim=1) # [4, emk*shot, 60, 60]
+            # pdb.set_trace()
+            guide_map = cos_sim_map.max(1)[1] # [4, 60, 60]
+            proto_feat_bin = []
+            for i in range(bs):
+                proto_feat_bin.append(proto_feat[i][:,guide_map[i]])
+            proto_feat_bin = torch.stack(proto_feat_bin,dim=0)
+            #
             corr_mask_bin = F.interpolate(corr_query_mask, size=(bin, bin), mode='bilinear', align_corners=True)
             merge_feat_bin = torch.cat([query_feat_bin, proto_feat_bin, corr_mask_bin], 1)
             merge_feat_bin = self.init_merge[idx](merge_feat_bin)
-
+            #
             if idx >= 1:
                 pre_feat_bin = pyramid_feat_list[idx - 1].clone()
                 pre_feat_bin = F.interpolate(pre_feat_bin, size=(bin, bin), mode='bilinear', align_corners=True)

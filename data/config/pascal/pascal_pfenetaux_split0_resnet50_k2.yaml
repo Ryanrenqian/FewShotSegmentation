@@ -38,7 +38,7 @@ TRAIN:
   resume: 
   evaluate: True
   split: 0
-  shot: 1
+  shot: 5
   max_sp: 5
   train_iter: 10
   eval_iter: 10

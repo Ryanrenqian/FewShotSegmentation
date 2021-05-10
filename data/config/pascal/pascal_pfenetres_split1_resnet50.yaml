@@ -5,7 +5,7 @@ DATA:
   classes: 2
 
 TRAIN:
-  arch: pfenetaux
+  arch: pfenetres
   layers: 50
   sync_bn: False
   train_h: 473
@@ -19,7 +19,6 @@ TRAIN:
   ignore_label: 255
   padding_label: 255
   aux_weight: 1.0
-  emk: 2
   train_gpu: [0]
   workers: 8  # data loader workers
   batch_size: 4  # batch size for training
@@ -33,12 +32,13 @@ TRAIN:
   manual_seed: 321
   print_freq: 5
   save_freq: 20
-  save_path: exp/pfenetaux/pascal/split2_resnet50_k2/model
+  save_path: exp/pfenetres/pascal/split1_resnet50/model
   weight: 
   resume: 
   evaluate: True
-  split: 2
-  shot: 5
+  split: 1
+  emk: 2
+  shot: 1
   max_sp: 5
   train_iter: 10
   eval_iter: 10
