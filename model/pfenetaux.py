@@ -227,6 +227,9 @@ class Model(nn.Module):
         else:
             return out
 
+
+
+
     def priormask(self,final_supp_list,supp_mask_list,query_feat_4,query_feat_3,query_feat):
         '''
 

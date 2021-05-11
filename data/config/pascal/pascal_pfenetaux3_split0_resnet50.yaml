@@ -5,7 +5,7 @@ DATA:
   classes: 2
 
 TRAIN:
-  arch: pfenetaux2
+  arch: pfenetaux3
   layers: 50
   sync_bn: False
   train_h: 473
@@ -33,11 +33,11 @@ TRAIN:
   manual_seed: 321
   print_freq: 5
   save_freq: 20
-  save_path: exp/pfenetaux2/pascal/split3_resnet50_k2/model
+  save_path: exp/pfenetaux3/pascal/split0_resnet50/model
   weight: 
   resume: 
   evaluate: True
-  split: 3
+  split: 0
   shot: 1
   max_sp: 5
   train_iter: 10
