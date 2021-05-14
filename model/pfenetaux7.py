@@ -172,16 +172,15 @@ class Model(nn.Module):
 
             supp_feat = torch.cat([supp_feat_3, supp_feat_2], 1)
             supp_feat = self.down_supp(supp_feat)
-            supp_feat_v = Weighted_GAP(supp_feat, mask)
-            # supp_feat_list.appned(supp_feat_v)
+            supp_feat_v = Weighted_GAP(final_supp_feat_4, mask)
             # 计算sup上的相似率
-            # print(supp_feat.size(),supp_feat_v.size())
-            for i in range(self.EM_k):
-                probs = F.cosine_similarity(supp_feat, supp_feat_v, dim=1).unsqueeze(1)
-                aux_probs = (1 - probs) * mask
-                #                 print(aux_probs.size(),probs.size(),mask.size())
-                aux_feat_v = Weighted_GAP(supp_feat, aux_probs)
-                supp_feat_v = Weighted_GAP(supp_feat, probs)
+            probs = F.cosine_similarity(final_supp_feat_4, supp_feat_v, dim=1).unsqueeze(1)
+            probs = F.interpolate(probs,size=(supp_feat_3.size(2), supp_feat_3.size(3)), mode='bilinear',
+                                align_corners=True)
+            aux_probs = (1 - probs) * mask
+            #                 print(aux_probs.size(),probs.size(),mask.size())
+            aux_feat_v = Weighted_GAP(supp_feat, aux_probs)
+            supp_feat_v = Weighted_GAP(supp_feat, probs)
             pri_proto_list.append(supp_feat_v)
             aux_proto_list.append(aux_feat_v)
 
@@ -212,16 +211,20 @@ class Model(nn.Module):
             # calculate query
             main_loss = self.criterion(out, y.long())
             bg_mask = torch.where(y != 255, 1 - y, y).unsqueeze(1)
-            bg_mask = F.interpolate(bg_mask.float(), size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
+            bg_mask_ = F.interpolate(bg_mask.float(), size=(query_feat_4.size(2), query_feat_4.size(3)), mode='bilinear',
                                     align_corners=True)
-            qry_bg_feat = Weighted_GAP(query_feat, bg_mask)
-            for i in range(self.EM_k):
-                probs = F.cosine_similarity(query_feat, qry_bg_feat, dim=1).unsqueeze(1)
-                aux_probs = (1 - probs) * mask
-                pri_proto = Weighted_GAP(query_feat, aux_probs)
-                aux_proto = Weighted_GAP(query_feat, probs)
+            bg_mask = F.interpolate(bg_mask.float(), size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
+                                    align_corners=True).squeeze(1)
+            qry_bg_feat = Weighted_GAP(query_feat_4, bg_mask_)
+            # for i in range(self.EM_k):
+            probs = F.cosine_similarity(query_feat_4, qry_bg_feat, dim=1).unsqueeze(1)
+            probs = F.interpolate(probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
+                                align_corners=True)
+            aux_probs = (1 - probs) * mask
+            pri_proto = Weighted_GAP(query_feat, aux_probs)
+            aux_proto = Weighted_GAP(query_feat, probs)
             bg, _ = self.decoder([pri_proto, aux_proto], query_feat)
-            aux_loss = self.criterion(bg, bg_mask.long().squeeze(1))
+            aux_loss = self.criterion(bg, bg_mask.long())
             return out.max(1)[1], main_loss, aux_loss
         else:
             return out
