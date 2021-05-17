@@ -1,3 +1,3 @@
 from . import *
 
-__all__ = ['asgnet','pfenet','pfenetaux','pfenetaux7']
+__all__ = ['asgnet','pfenet','pfenetaux','pfenetaux9']
