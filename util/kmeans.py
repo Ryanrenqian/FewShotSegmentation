@@ -1,10 +1,10 @@
 import torch
 from pykeops.torch import LazyTensor
 import numpy as np
-import matplotlib
-matplotlib.use('agg')
-import matplotlib.pyplot as plt
-import time
+# import matplotlib
+# matplotlib.use('agg')
+# import matplotlib.pyplot as plt
+# import time
 
 class KmeansClustering():
     def __init__(self, num_cnt, iters, init='kmeans++'):
