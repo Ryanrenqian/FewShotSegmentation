@@ -93,7 +93,7 @@ class Model(nn.Module):
         self.inner_cls = []
         for bin in self.pyramid_bins:
             self.init_merge.append(nn.Sequential(
-                nn.Conv2d(reduce_dim * 3 + mask_add_num, reduce_dim, kernel_size=1, padding=0, bias=False),
+                nn.Conv2d(reduce_dim * 2 + mask_add_num, reduce_dim, kernel_size=1, padding=0, bias=False),
                 nn.ReLU(inplace=True),
             ))
             self.beta_conv.append(nn.Sequential(
@@ -285,7 +285,7 @@ class Model(nn.Module):
             else:
                 bin = tmp_bin
                 query_feat_bin = self.avgpool_list[idx](query_feat)
-            proto_feat_bin = torch.cat([proto.expand(-1, -1, bin, bin) for proto in prototypes], dim=1)
+            proto_feat_bin = prototypes[0].expand(-1, -1, bin, bin)
             corr_mask_bin = F.interpolate(corr_query_mask, size=(bin, bin), mode='bilinear', align_corners=True)
             merge_feat_bin = torch.cat([query_feat_bin, proto_feat_bin, corr_mask_bin], 1)
             merge_feat_bin = self.init_merge[idx](merge_feat_bin)
