@@ -96,7 +96,7 @@ class Model(nn.Module):
         self.inner_cls = []        
         for bin in self.pyramid_bins:
             self.init_merge.append(nn.Sequential(
-                nn.Conv2d(reduce_dim*2 + mask_add_num, reduce_dim, kernel_size=1, padding=0, bias=False),
+                nn.Conv2d(reduce_dim*3 + mask_add_num, reduce_dim, kernel_size=1, padding=0, bias=False),
                 nn.ReLU(inplace=True),
             ))                      
             self.beta_conv.append(nn.Sequential(
@@ -162,7 +162,6 @@ class Model(nn.Module):
         final_supp_list = []
         # supp_feat_list = []
         mask_list = []
-        supp_feats = []
         for i in range(self.shot):
             mask = (s_y[:,i,:,:] == 1).float().unsqueeze(1)
             mask_list.append(mask)
@@ -177,34 +176,26 @@ class Model(nn.Module):
 
             supp_feat = torch.cat([supp_feat_3, supp_feat_2], 1)
             supp_feat = self.down_supp(supp_feat)
-            supp_feat_v = Weighted_GAP(supp_feat, mask)
+            # supp_feat_v = Weighted_GAP(supp_feat, mask)
             # supp_feat_list.appned(supp_feat_v)
             # 计算sup上的相似率
             # print(supp_feat.size(),supp_feat_v.size())
-            for i in range(self.EM_k):
-                probs = F.cosine_similarity(supp_feat,supp_feat_v,dim=1).unsqueeze(1)
-                aux_probs = (1-probs) * mask
-                aux_feat_v = Weighted_GAP(supp_feat,aux_probs)
-                supp_feat_v = Weighted_GAP(supp_feat,probs)
-            pri_proto_list.append(supp_feat_v)
-            aux_proto_list.append(aux_feat_v)
+
+            pri_proto,aux_proto,probs = self.generate_proto(supp_feat,mask)
+            pri_proto_list.append(pri_proto)
+            aux_proto_list.append(aux_proto)
 
         # prior mask
         corr_query_mask = self.priormask(final_supp_list,mask_list,query_feat_4,query_feat_3,query_feat)
-
+        pri_proto = pri_proto_list[0]
+        aux_proto = aux_proto_list[0]
         if self.shot > 1:
-            pri_proto = pri_proto_list[0]
-            aux_proto = aux_proto_list[0]
-            # channel_att = supp_feat_list[0]
             for i in range(1, len(pri_proto_list)):
                 pri_proto += pri_proto_list[i]
                 aux_proto += aux_proto_list[i]
-                # channel_att = supp_feat_list[i]
             pri_proto /= len(pri_proto_list)
             aux_proto /= len(aux_proto_list)
-        else:
-            pri_proto = pri_proto_list[0]
-            aux_proto = aux_proto_list[0]
+
 
         out,out_list = self.decoder(corr_query_mask,[pri_proto,aux_proto],query_feat)
 
@@ -227,7 +218,26 @@ class Model(nn.Module):
         else:
             return out
 
-
+    def generate_proto(self,feats,mask):
+        pri_proto = Weighted_GAP(feats, mask)
+        aux_proto = pri_proto
+        s_0 = F.cosine_similarity(feats, pri_proto, dim=1)
+        entropy = -(s_0 * torch.log2(s_0)).sum() * 2
+        k = 0
+        while(True and k<self.EM_k):
+            probs = s_0.unsqueeze(1)
+            _pri_proto = Weighted_GAP(feats, probs)
+            aux_probs = (1 - probs) * mask
+            _aux_proto = Weighted_GAP(feats, aux_probs)
+            s_0 = F.cosine_similarity(feats, _pri_proto, dim=1)
+            s_1 = F.cosine_similarity(feats, _aux_proto, dim=1)
+            _entropy = -(s_0 * torch.log2(s_0)).sum() -(1 * torch.log2(s_1)).sum()
+            if entropy < _entropy:
+                break
+            pri_proto = _pri_proto
+            aux_proto = _aux_proto
+            k += 1
+        return pri_proto,aux_proto,probs
 
 
     def priormask(self,final_supp_list,supp_mask_list,query_feat_4,query_feat_3,query_feat):
