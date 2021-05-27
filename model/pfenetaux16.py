@@ -9,12 +9,14 @@ import pdb
 import model.resnet as models
 
 
+
 def Weighted_GAP(supp_feat, mask):
     supp_feat = supp_feat * mask
     feat_h, feat_w = supp_feat.shape[-2:][0], supp_feat.shape[-2:][1]
     area = F.avg_pool2d(mask, (supp_feat.size()[2], supp_feat.size()[3])) * feat_h * feat_w + 0.0005
-    supp_feat = F.avg_pool2d(input=supp_feat, kernel_size=supp_feat.shape[-2:]) * feat_h * feat_w / area
+    supp_feat = F.avg_pool2d(input=supp_feat, kernel_size=supp_feat.shape[-2:]) * feat_h * feat_w / area  
     return supp_feat
+  
 
 
 class Model(nn.Module):
@@ -35,6 +37,7 @@ class Model(nn.Module):
         self.ppm_scales = args.ppm_scales
         self.EM_k = args.emk
         models.BatchNorm = BatchNorm
+        
 
         print('INFO: Using ResNet {}'.format(layers))
         if layers == 50:
@@ -43,8 +46,7 @@ class Model(nn.Module):
             resnet = models.resnet101(pretrained=pretrained)
         else:
             resnet = models.resnet152(pretrained=pretrained)
-        self.layer0 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu1, resnet.conv2, resnet.bn2, resnet.relu2,
-                                    resnet.conv3, resnet.bn3, resnet.relu3, resnet.maxpool)
+        self.layer0 = nn.Sequential(resnet.conv1, resnet.bn1, resnet.relu1, resnet.conv2, resnet.bn2, resnet.relu2, resnet.conv3, resnet.bn3, resnet.relu3, resnet.maxpool)
         self.layer1, self.layer2, self.layer3, self.layer4 = resnet.layer1, resnet.layer2, resnet.layer3, resnet.layer4
 
         for n, m in self.layer3.named_modules():
@@ -58,25 +60,25 @@ class Model(nn.Module):
             elif 'downsample.0' in n:
                 m.stride = (1, 1)
         reduce_dim = 256
-        fea_dim = 1024 + 512
+        fea_dim = 1024 + 512       
 
         self.cls = nn.Sequential(
             nn.Conv2d(reduce_dim, reduce_dim, kernel_size=3, padding=1, bias=False),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(p=0.1),
+            nn.Dropout2d(p=0.1),                 
             nn.Conv2d(reduce_dim, classes, kernel_size=1)
-        )
+        )                 
 
         self.down_query = nn.Sequential(
             nn.Conv2d(fea_dim, reduce_dim, kernel_size=1, padding=0, bias=False),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(p=0.5)
+            nn.Dropout2d(p=0.5)                  
         )
         self.down_supp = nn.Sequential(
             nn.Conv2d(fea_dim, reduce_dim, kernel_size=1, padding=0, bias=False),
             nn.ReLU(inplace=True),
-            nn.Dropout2d(p=0.5)
-        )
+            nn.Dropout2d(p=0.5)                   
+        )  
 
         self.pyramid_bins = self.ppm_scales
         self.avgpool_list = []
@@ -86,57 +88,60 @@ class Model(nn.Module):
                     nn.AdaptiveAvgPool2d(bin)
                 )
 
+
         factor = 1
         mask_add_num = 1
         self.init_merge = []
         self.beta_conv = []
-        self.inner_cls = []
+        self.inner_cls = []        
         for bin in self.pyramid_bins:
             self.init_merge.append(nn.Sequential(
-                nn.Conv2d(reduce_dim * 3 + mask_add_num, reduce_dim, kernel_size=1, padding=0, bias=False),
+                nn.Conv2d(reduce_dim*3 + mask_add_num, reduce_dim, kernel_size=1, padding=0, bias=False),
                 nn.ReLU(inplace=True),
-            ))
+            ))                      
             self.beta_conv.append(nn.Sequential(
                 nn.Conv2d(reduce_dim, reduce_dim, kernel_size=3, padding=1, bias=False),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(reduce_dim, reduce_dim, kernel_size=3, padding=1, bias=False),
                 nn.ReLU(inplace=True)
-            ))
+            ))            
             self.inner_cls.append(nn.Sequential(
                 nn.Conv2d(reduce_dim, reduce_dim, kernel_size=3, padding=1, bias=False),
                 nn.ReLU(inplace=True),
-                nn.Dropout2d(p=0.1),
+                nn.Dropout2d(p=0.1),                 
                 nn.Conv2d(reduce_dim, classes, kernel_size=1)
-            ))
-        self.init_merge = nn.ModuleList(self.init_merge)
+            ))            
+        self.init_merge = nn.ModuleList(self.init_merge) 
         self.beta_conv = nn.ModuleList(self.beta_conv)
-        self.inner_cls = nn.ModuleList(self.inner_cls)
+        self.inner_cls = nn.ModuleList(self.inner_cls)                             
+
 
         self.res1 = nn.Sequential(
-            nn.Conv2d(reduce_dim * len(self.pyramid_bins), reduce_dim, kernel_size=1, padding=0, bias=False),
-            nn.ReLU(inplace=True),
-        )
+            nn.Conv2d(reduce_dim*len(self.pyramid_bins), reduce_dim, kernel_size=1, padding=0, bias=False),
+            nn.ReLU(inplace=True),                          
+        )              
         self.res2 = nn.Sequential(
             nn.Conv2d(reduce_dim, reduce_dim, kernel_size=3, padding=1, bias=False),
-            nn.ReLU(inplace=True),
+            nn.ReLU(inplace=True),   
             nn.Conv2d(reduce_dim, reduce_dim, kernel_size=3, padding=1, bias=False),
-            nn.ReLU(inplace=True),
-        )
-
+            nn.ReLU(inplace=True),                             
+        )                        
+     
         self.GAP = nn.AdaptiveAvgPool2d(1)
 
         self.alpha_conv = []
-        for idx in range(len(self.pyramid_bins) - 1):
+        for idx in range(len(self.pyramid_bins)-1):
             self.alpha_conv.append(nn.Sequential(
                 nn.Conv2d(512, 256, kernel_size=1, stride=1, padding=0, bias=False),
                 nn.ReLU()
-            ))
+            ))     
         self.alpha_conv = nn.ModuleList(self.alpha_conv)
+     
 
-    def forward(self, x, s_x=torch.FloatTensor(1, 1, 3, 473, 473).cuda(), s_y=torch.FloatTensor(1, 1, 473, 473).cuda(),
-                s_seed=None, y=None):
+
+    def forward(self, x, s_x=torch.FloatTensor(1,1,3,473,473).cuda(), s_y=torch.FloatTensor(1,1,473,473).cuda(), s_seed=None, y=None):
         x_size = x.size()
-        assert (x_size[2] - 1) % 8 == 0 and (x_size[3] - 1) % 8 == 0
+        assert (x_size[2]-1) % 8 == 0 and (x_size[3]-1) % 8 == 0
         h = int((x_size[2] - 1) / 8 * self.zoom_factor + 1)
         w = int((x_size[3] - 1) / 8 * self.zoom_factor + 1)
 
@@ -145,38 +150,47 @@ class Model(nn.Module):
             query_feat_0 = self.layer0(x)
             query_feat_1 = self.layer1(query_feat_0)
             query_feat_2 = self.layer2(query_feat_1)
-            query_feat_3 = self.layer3(query_feat_2)
+            query_feat_3 = self.layer3(query_feat_2)  
             query_feat_4 = self.layer4(query_feat_3)
+
         query_feat = torch.cat([query_feat_3, query_feat_2], 1)
         query_feat = self.down_query(query_feat)
 
-        #   Support Feature
+        #   Support Feature     
         pri_proto_list = []
         aux_proto_list = []
         final_supp_list = []
+        # supp_feat_list = []
         mask_list = []
         for i in range(self.shot):
-            mask = (s_y[:, i, :, :] == 1).float().unsqueeze(1)
+            mask = (s_y[:,i,:,:] == 1).float().unsqueeze(1)
             mask_list.append(mask)
             with torch.no_grad():
-                supp_feat_0 = self.layer0(s_x[:, i, :, :, :])
+                supp_feat_0 = self.layer0(s_x[:,i,:,:,:])
                 supp_feat_1 = self.layer1(supp_feat_0)
                 supp_feat_2 = self.layer2(supp_feat_1)
                 supp_feat_3 = self.layer3(supp_feat_2)
-                mask = F.interpolate(mask, size=(supp_feat_3.size(2), supp_feat_3.size(3)), mode='bilinear',
-                                     align_corners=True)
-                final_supp_feat_4 = self.layer4(supp_feat_3 * mask)
+                mask = F.interpolate(mask, size=(supp_feat_3.size(2), supp_feat_3.size(3)), mode='bilinear', align_corners=True)
+                final_supp_feat_4 = self.layer4(supp_feat_3*mask)
                 final_supp_list.append(final_supp_feat_4)
+
             supp_feat = torch.cat([supp_feat_3, supp_feat_2], 1)
             supp_feat = self.down_supp(supp_feat)
-            pri_proto,aux_proto,_ = self.generate_proto(supp_feat,mask)
+            # supp_feat_v = Weighted_GAP(supp_feat, mask)
+            # supp_feat_list.appned(supp_feat_v)
+            # 计算sup上的相似率
+            # print(supp_feat.size(),supp_feat_v.size())
+
+            _,_,probs = self.generate_proto(final_supp_feat_4,mask)
+            probs = F.interpolate(probs, size=(supp_feat.size(2), supp_feat.size(3)), mode='bilinear',
+                                  align_corners=True)
+            aux_proto = Weighted_GAP(supp_feat,1-probs)
+            pri_proto = Weighted_GAP(supp_feat,probs)
             pri_proto_list.append(pri_proto)
             aux_proto_list.append(aux_proto)
 
         # prior mask
-        corr_query_mask = self.priormask(final_supp_list,mask_list,query_feat_4,query_feat_3)
-        corr_query_mask = F.interpolate(corr_query_mask, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
-                                        align_corners=True)
+        corr_query_mask = self.priormask(final_supp_list,mask_list,query_feat_4,query_feat_3,query_feat)
         pri_proto = pri_proto_list[0]
         aux_proto = aux_proto_list[0]
         if self.shot > 1:
@@ -184,42 +198,53 @@ class Model(nn.Module):
                 pri_proto += pri_proto_list[i]
                 aux_proto += aux_proto_list[i]
             pri_proto /= len(pri_proto_list)
-            aux_proto /= len(pri_proto_list)
+            aux_proto /= len(aux_proto_list)
 
-        out, fgloss = self.decoder(corr_query_mask,[pri_proto,aux_proto], query_feat,y.long())
+
+        out,out_list = self.decoder(corr_query_mask,[pri_proto,aux_proto],query_feat)
+
+        #   Output Part
+        if self.zoom_factor != 1:
+            out = F.interpolate(out, size=(h, w), mode='bilinear', align_corners=True)
 
         if self.training:
             # calculate query
-            y_ = torch.where(y != 255, 1 - y, y).unsqueeze(1)
-            bg_mask = F.interpolate(y_.float(), size=(query_feat_4.size(2), query_feat_4.size(3)), mode='bilinear',
-                                    align_corners=True)
-            _,_,probs = self.generate_proto(query_feat_4,bg_mask)
-            probs = F.interpolate(probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',align_corners=True)
-            aux_probs = 1-probs
-            aux_proto_bg = Weighted_GAP(query_feat,aux_probs)
-            pri_proto_bg = Weighted_GAP(query_feat,probs)
-            # calculate bgmask
-            finnal_query_list = [self.layer4(query_feat_3*bg_mask)]
-            corr_query_bgmask = self.priormask(finnal_query_list,[bg_mask],query_feat_4,query_feat_3)
-            corr_query_bgmask = F.interpolate(corr_query_bgmask, size=(query_feat.size(2), query_feat.size(3)),
-                                            mode='bilinear',
-                                            align_corners=True)
-            bg, bg_loss = self.decoder(corr_query_bgmask,[pri_proto_bg,aux_proto_bg], query_feat,y_.squeeze(1))
-            return out.max(1)[1], fgloss, bg_loss
+            main_loss = self.criterion(out, y.long())
+            aux_loss = torch.zeros_like(main_loss).cuda()
+
+            for idx_k in range(len(out_list)):    
+                inner_out = out_list[idx_k]
+                inner_out = F.interpolate(inner_out, size=(h, w), mode='bilinear', align_corners=True)
+                aux_loss = aux_loss + self.criterion(inner_out, y.long())   
+            aux_loss = aux_loss / len(out_list)
+
+            return out.max(1)[1], main_loss, aux_loss
         else:
             return out
 
     def generate_proto(self,feats,mask):
         pri_proto = Weighted_GAP(feats, mask)
-        for i in range(self.EM_k):
-            probs = F.cosine_similarity(feats, pri_proto, dim=1).unsqueeze(1)
-            pri_proto = Weighted_GAP(feats, probs)
-        aux_probs = (1 - probs) * mask
-        aux_proto = Weighted_GAP(feats, aux_probs)
+        aux_proto = pri_proto
+        s_0 = F.cosine_similarity(feats, pri_proto, dim=1)
+        entropy = -(s_0 * torch.log2(s_0)).sum() * 2
+        k = 0
+        while(True and k<self.EM_k):
+            probs = s_0.unsqueeze(1)
+            _pri_proto = Weighted_GAP(feats, probs)
+            aux_probs = (1 - probs) * mask
+            _aux_proto = Weighted_GAP(feats, aux_probs)
+            s_0 = F.cosine_similarity(feats, _pri_proto, dim=1)
+            s_1 = F.cosine_similarity(feats, _aux_proto, dim=1)
+            _entropy = -(s_0 * torch.log2(s_0)).sum() -(1 * torch.log2(s_1)).sum()
+            if entropy < _entropy:
+                break
+            pri_proto = _pri_proto
+            aux_proto = _aux_proto
+            k += 1
         return pri_proto,aux_proto,probs
 
 
-    def priormask(self,final_supp_list,supp_mask_list,query_feat_4,query_feat_3):
+    def priormask(self,final_supp_list,supp_mask_list,query_feat_4,query_feat_3,query_feat):
         '''
 
         Args:
@@ -259,10 +284,11 @@ class Model(nn.Module):
                                        mode='bilinear', align_corners=True)
             corr_query_mask_list.append(corr_query)
         corr_query_mask = torch.cat(corr_query_mask_list, 1).mean(1).unsqueeze(1)
-
+        corr_query_mask = F.interpolate(corr_query_mask, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
+                                        align_corners=True)
         return corr_query_mask
 
-    def decoder(self,corr_query_mask, prototypes, query_feat: torch.Tensor,mask: torch.Tensor):
+    def decoder(self,corr_query_mask: torch.Tensor,prototypes: list, query_feat:torch.Tensor):
         '''
 
         Args:
@@ -273,10 +299,9 @@ class Model(nn.Module):
         Returns:
 
         '''
-
         out_list = []
         pyramid_feat_list = []
-        size=int((473-1)/8 * self.zoom_factor + 1)
+
         for idx, tmp_bin in enumerate(self.pyramid_bins):
             if tmp_bin <= 1.0:
                 bin = int(query_feat.shape[2] * tmp_bin)
@@ -284,7 +309,7 @@ class Model(nn.Module):
             else:
                 bin = tmp_bin
                 query_feat_bin = self.avgpool_list[idx](query_feat)
-            proto_feat_bin = torch.cat([proto.expand(-1, -1, bin, bin) for proto in prototypes], dim=1)
+            proto_feat_bin = torch.cat([proto.expand(-1, -1, bin, bin) for proto in prototypes],dim=1)
             corr_mask_bin = F.interpolate(corr_query_mask, size=(bin, bin), mode='bilinear', align_corners=True)
             merge_feat_bin = torch.cat([query_feat_bin, proto_feat_bin, corr_mask_bin], 1)
             merge_feat_bin = self.init_merge[idx](merge_feat_bin)
@@ -306,16 +331,7 @@ class Model(nn.Module):
         query_feat = self.res1(query_feat)
         query_feat = self.res2(query_feat) + query_feat
         out = self.cls(query_feat)
-        if self.zoom_factor != 1:
-            out = F.interpolate(out, size=(size, size), mode='bilinear', align_corners=True)
-        main_loss = self.criterion(out, mask)
-        aux_loss = torch.zeros_like(main_loss).cuda()
-        for idx_k in range(len(out_list)):
-            inner_out = out_list[idx_k]
-            inner_out = F.interpolate(inner_out, size=(size, size), mode='bilinear', align_corners=True)
-            aux_loss = aux_loss + self.criterion(inner_out, mask)
-        aux_loss = aux_loss / len(out_list)
-        return out, main_loss+aux_loss
+        return out,out_list
 
     def _optimizer(self, args):
         optimizer = torch.optim.SGD(
@@ -327,8 +343,11 @@ class Model(nn.Module):
                 {'params': self.beta_conv.parameters()},
                 {'params': self.inner_cls.parameters()},
                 {'params': self.res1.parameters()},
-                {'params': self.res2.parameters()},
+                {'params': self.res2.parameters()},        
                 {'params': self.cls.parameters()}
             ],
             lr=args.base_lr, momentum=args.momentum, weight_decay=args.weight_decay)
         return optimizer
+
+
+
