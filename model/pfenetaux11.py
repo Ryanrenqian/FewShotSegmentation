@@ -194,8 +194,7 @@ class Model(nn.Module):
             bg_mask = F.interpolate(y_.float(), size=(query_feat_4.size(2), query_feat_4.size(3)), mode='bilinear',
                                     align_corners=True)
             _,_,probs = self.generate_proto(query_feat_4,bg_mask)
-            probs = F.interpolate(probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
-                                    align_corners=True)
+            probs = F.interpolate(probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',align_corners=True)
             aux_probs = 1-probs
             aux_proto_bg = Weighted_GAP(query_feat,aux_probs)
             pri_proto_bg = Weighted_GAP(query_feat,probs)

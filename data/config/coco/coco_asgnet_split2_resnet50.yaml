@@ -1,5 +1,5 @@
 DATA:
-  data_root: './coco_data'
+  data_root: './data/data/coco'
   train_list: './data/lists/coco/train_data_list.txt'
   val_list: './data/lists/coco/val_data_list.txt'
   classes: 2

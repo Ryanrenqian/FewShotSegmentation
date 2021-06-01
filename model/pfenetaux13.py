@@ -162,6 +162,7 @@ class Model(nn.Module):
         final_supp_list = []
         # supp_feat_list = []
         mask_list = []
+        supp_feats = []
         for i in range(self.shot):
             mask = (s_y[:,i,:,:] == 1).float().unsqueeze(1)
             mask_list.append(mask)
@@ -183,7 +184,6 @@ class Model(nn.Module):
             for i in range(self.EM_k):
                 probs = F.cosine_similarity(supp_feat,supp_feat_v,dim=1).unsqueeze(1)
                 aux_probs = (1-probs) * mask
-#                 print(aux_probs.size(),probs.size(),mask.size())
                 aux_feat_v = Weighted_GAP(supp_feat,aux_probs)
                 supp_feat_v = Weighted_GAP(supp_feat,probs)
             pri_proto_list.append(supp_feat_v)

@@ -20,7 +20,7 @@ TRAIN:
   padding_label: 255
   aux_weight: 1.0
   train_gpu: [0]
-  workers: 8  # data loader workers
+  workers: 12  # data loader workers
   batch_size: 4  # batch size for training
   batch_size_val: 1
   base_lr: 0.0025
