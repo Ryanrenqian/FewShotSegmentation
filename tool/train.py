@@ -357,7 +357,8 @@ def validate(val_loader, model, criterion):
                 
             subcls = subcls[0].cpu().numpy()[0]
             protos.append(proto.detach().cpu().numpy()[0])
-            aux_protos.append(aux_proto.detach().cpu().numpy()[0])
+            if aux_protos:
+                aux_protos.append(aux_proto.detach().cpu().numpy()[0])
             labels.append(subcls)
             class_intersection_meter[(subcls-1)%split_gap] += intersection[1]
             class_union_meter[(subcls-1)%split_gap] += union[1] 
