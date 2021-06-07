@@ -163,7 +163,7 @@ def main_worker(argss):
         writer.add_scalar('allAcc_train', allAcc_train, epoch_log)
 
         if args.evaluate and (epoch % 2 == 0 or (epoch<=70 and epoch%1==0)):
-            loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou,class_iou_class = validate(val_loader, model, criterion)
+            loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou,class_iou_class,protos,labels,aux_protos = validate(val_loader, model, criterion)
             # if main_process():
             writer.add_scalar('loss_val', loss_val, epoch_log)
             writer.add_scalar('mIoU_val', mIoU_val, epoch_log)
@@ -171,6 +171,8 @@ def main_worker(argss):
             writer.add_scalar('class_miou_val', class_miou, epoch_log)
             writer.add_scalar('allAcc_val', allAcc_val, epoch_log)
             if class_miou > max_iou:
+                npzfile = os.path.join(args.save_path, 'protos.npz')
+                np.savez(npzfile, labels=labels, protos=protos,aux_protos=aux_protos)
                 max_iou = class_miou
                 max_class_iou_class = class_iou_class
                 if os.path.exists(filename):
@@ -220,32 +222,19 @@ def train(train_loader, model, optimizer, epoch):
         s_init_seed = s_init_seed.cuda(non_blocking=True)
         
         output, main_loss, aux_loss = model(s_x=s_input, s_y=s_mask, x=input, y=target, s_seed=s_init_seed)
-        # segment background
-        # s_bg = torch.ones_like(s_mask) - s_mask
-        # bg_target = torch.ones_like(target) - target
-        # s_bg = s_bg.cuda(non_blocking=True)
-        # bg_target = bg_target.cuda(non_blocking=True)
-        # _, main_loss_bg, aux_loss_bg = model(s_x=s_input, s_y=s_bg, x=input, y=bg_target, s_seed=s_init_seed)
-        # if not args.multiprocessing_distributed:
+
         main_loss, aux_loss = torch.mean(main_loss), torch.mean(aux_loss)
-        # main_loss_bg, aux_loss_bg = torch.mean(main_loss_bg),torch.mean(aux_loss_bg)
         loss = main_loss  + args.aux_weight * aux_loss
-        # loss = loss + main_loss_bg + args.aux_weight * aux_loss_bg
+
         optimizer.zero_grad()
 
         loss.backward()
         optimizer.step()
         n = input.size(0)
-        # if args.multiprocessing_distributed:
-        #     main_loss, aux_loss, loss = main_loss.detach() * n, aux_loss * n, loss * n
-        #     count = target.new_tensor([n], dtype=torch.long)
-        #     dist.all_reduce(main_loss), dist.all_reduce(aux_loss), dist.all_reduce(loss), dist.all_reduce(count)
-        #     n = count.item()
-        #     main_loss, aux_loss, loss = main_loss / n, aux_loss / n, loss / n
+
 
         intersection, union, target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
-        # if args.multiprocessing_distributed:
-        #     dist.all_reduce(intersection), dist.all_reduce(union), dist.all_reduce(target)
+
         intersection, union, target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy()
         intersection_meter.update(intersection), union_meter.update(union), target_meter.update(target)
 
@@ -299,7 +288,6 @@ def train(train_loader, model, optimizer, epoch):
 
 
 def validate(val_loader, model, criterion):
-    # if main_process():
     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
     batch_time = AverageMeter()
     model_time = AverageMeter()
@@ -308,6 +296,9 @@ def validate(val_loader, model, criterion):
     intersection_meter = AverageMeter()
     union_meter = AverageMeter()
     target_meter = AverageMeter()
+    protos = []
+    labels = []
+    aux_protos = []
     if args.use_coco:
         split_gap = 20
     else:
@@ -346,7 +337,7 @@ def validate(val_loader, model, criterion):
             target = target.cuda(non_blocking=True)
             ori_label = ori_label.cuda(non_blocking=True)
             start_time = time.time()
-            output = model(s_x=s_input, s_y=s_mask, x=input, y=target, s_seed=s_init_seed)
+            output,proto,aux_proto = model(s_x=s_input, s_y=s_mask, x=input, y=target, s_seed=s_init_seed)
 
 
             output = F.interpolate(output, size=target.size()[1:], mode='bilinear', align_corners=True)         
@@ -365,6 +356,9 @@ def validate(val_loader, model, criterion):
             intersection_meter.update(intersection), union_meter.update(union), target_meter.update(new_target)
                 
             subcls = subcls[0].cpu().numpy()[0]
+            protos.append(proto.detach().cpu().numpy()[0])
+            aux_protos.append(aux_proto.detach().cpu().numpy()[0])
+            labels.append(subcls)
             class_intersection_meter[(subcls-1)%split_gap] += intersection[1]
             class_union_meter[(subcls-1)%split_gap] += union[1] 
 
@@ -409,7 +403,7 @@ def validate(val_loader, model, criterion):
     logger.info('<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<')
 
     print('avg inference time: {:.4f}, count: {}'.format(model_time.avg, test_num))
-    return loss_meter.avg, mIoU, mAcc, allAcc, class_miou,class_iou_class
+    return loss_meter.avg, mIoU, mAcc, allAcc, class_miou,class_iou_class,protos,labels,aux_protos
 
 
 if __name__ == '__main__':

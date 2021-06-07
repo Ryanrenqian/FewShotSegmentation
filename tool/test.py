@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import logging
 import argparse
-
+import pickle
 # os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
 # os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
@@ -119,7 +119,7 @@ def main_worker(argss):
 
     model = torch.nn.DataParallel(model.cuda(), device_ids=[0])
 
-    imgs_path = os.path.join(args.save_path), '../prediction/')
+    # imgs_path = os.path.join(args.save_path), '../prediction/')
 
     if args.weight:
         if os.path.isfile(args.weight):
@@ -192,65 +192,68 @@ def validate(val_loader, model, criterion, args):
     assert test_num % args.batch_size_val == 0
     iter_num = 0
     total_time = 0
-    for e in range(20):
-        for i, (input, target, s_input, s_mask, s_init_seed, subcls, ori_label) in enumerate(val_loader):
-            if (iter_num-1) * args.batch_size_val >= test_num:
-                break
-            iter_num += 1
-            data_time.update(time.time() - end)
-            input = input.cuda(non_blocking=True)
-            target = target.cuda(non_blocking=True)
-            ori_label = ori_label.cuda(non_blocking=True)
-            start_time = time.time()
-            output = model(s_x=s_input, s_y=s_mask, x=input, y=target, s_seed=s_init_seed)
-            total_time = total_time + 1
-            model_time.update(time.time() - start_time)
+    protos = []
+    labels = []
+    for i, (input, target, s_input, s_mask, s_init_seed, subcls, ori_label) in enumerate(val_loader):
+        if (iter_num-1) * args.batch_size_val >= test_num:
+            break
+        iter_num += 1
+        data_time.update(time.time() - end)
+        input = input.cuda(non_blocking=True)
+        target = target.cuda(non_blocking=True)
+        ori_label = ori_label.cuda(non_blocking=True)
+        subcls = subcls[0].cpu().numpy()[0]
+        start_time = time.time()
+        output,proto = model(s_x=s_input, s_y=s_mask, x=input, y=target, s_seed=s_init_seed)
+        total_time = total_time + 1
+        model_time.update(time.time() - start_time)
+        protos.append(proto.cpu().numpy()[0])
+        labels.append(subcls)
+        if args.ori_resize:
+            longerside = max(ori_label.size(1), ori_label.size(2))
+            backmask = torch.ones(ori_label.size(0), longerside, longerside).cuda()*255
+            backmask[0, :ori_label.size(1), :ori_label.size(2)] = ori_label
+            target = backmask.clone().long()
 
-            if args.ori_resize:
-                longerside = max(ori_label.size(1), ori_label.size(2))
-                backmask = torch.ones(ori_label.size(0), longerside, longerside).cuda()*255
-                backmask[0, :ori_label.size(1), :ori_label.size(2)] = ori_label
-                target = backmask.clone().long()
+        output = F.interpolate(output, size=target.size()[1:], mode='bilinear', align_corners=True)
+        loss = criterion(output, target)
 
-            output = F.interpolate(output, size=target.size()[1:], mode='bilinear', align_corners=True)
-            loss = criterion(output, target)
+        n = input.size(0)
+        loss = torch.mean(loss)
 
-            n = input.size(0)
-            loss = torch.mean(loss)
+        output = output.max(1)[1]
 
-            output = output.max(1)[1]
-
-            intersection, union, new_target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
-            intersection, union, target, new_target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy(), new_target.cpu().numpy()
+        intersection, union, new_target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
+        intersection, union, target, new_target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy(), new_target.cpu().numpy()
 
 
-            intersection_meter.update(intersection), union_meter.update(union), target_meter.update(new_target)
+        intersection_meter.update(intersection), union_meter.update(union), target_meter.update(new_target)
 
-            subcls = subcls[0].cpu().numpy()[0]
-            class_intersection_meter[(subcls-1)%split_gap] += intersection[1]
-            class_union_meter[(subcls-1)%split_gap] += union[1]
 
-            accuracy = sum(intersection_meter.val) / (sum(target_meter.val) + 1e-10)
-            loss_meter.update(loss.item(), input.size(0))
-            batch_time.update(time.time() - end)
-            end = time.time()
-            if ((i + 1) % (test_num/100) == 0):
-                logger.info('Test: [{}/{}] '
-                            'Data {data_time.val:.3f} ({data_time.avg:.3f}) '
-                            'Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) '
-                            'Loss {loss_meter.val:.4f} ({loss_meter.avg:.4f}) '
-                            'Accuracy {accuracy:.4f}.'.format(iter_num* args.batch_size_val, test_num,
-                                                              data_time=data_time,
-                                                              batch_time=batch_time,
-                                                              loss_meter=loss_meter,
-                                                              accuracy=accuracy))
+        class_intersection_meter[(subcls-1)%split_gap] += intersection[1]
+        class_union_meter[(subcls-1)%split_gap] += union[1]
+
+        accuracy = sum(intersection_meter.val) / (sum(target_meter.val) + 1e-10)
+        loss_meter.update(loss.item(), input.size(0))
+        batch_time.update(time.time() - end)
+        end = time.time()
+        if ((i + 1) % (test_num/100) == 0):
+            logger.info('Test: [{}/{}] '
+                        'Data {data_time.val:.3f} ({data_time.avg:.3f}) '
+                        'Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) '
+                        'Loss {loss_meter.val:.4f} ({loss_meter.avg:.4f}) '
+                        'Accuracy {accuracy:.4f}.'.format(iter_num* args.batch_size_val, test_num,
+                                                          data_time=data_time,
+                                                          batch_time=batch_time,
+                                                          loss_meter=loss_meter,
+                                                          accuracy=accuracy))
 
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)
     mIoU = np.mean(iou_class)
     mAcc = np.mean(accuracy_class)
     allAcc = sum(intersection_meter.sum) / (sum(target_meter.sum) + 1e-10)
-
+    np.savez(args.save_path+'protos',labels=labels,protos=protos)
 
     class_iou_class = []
     class_miou = 0

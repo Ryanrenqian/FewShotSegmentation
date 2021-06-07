@@ -178,18 +178,12 @@ class Model(nn.Module):
         corr_query_mask = self.priormask(final_supp_list,mask_list,query_feat_4,query_feat_3)
         corr_query_mask = F.interpolate(corr_query_mask, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
                                         align_corners=True)
+        pri_proto = pri_proto_list[0]
         if self.shot > 1:
-            pri_proto = pri_proto_list[0]
-
             for i in range(1, len(pri_proto_list)):
                 pri_proto += pri_proto_list[i]
 
             pri_proto /= len(pri_proto_list)
-
-        else:
-            pri_proto = pri_proto_list[0]
-
-
         out, fgloss = self.decoder(corr_query_mask,pri_proto, query_feat,y.long())
 
         if self.training:
@@ -207,7 +201,7 @@ class Model(nn.Module):
             bg, bg_loss = self.decoder(corr_query_bgmask,qry_bg_feat, query_feat,y_.squeeze(1))
             return out.max(1)[1], fgloss, bg_loss
         else:
-            return out
+            return out,pri_proto
 
     def priormask(self,final_supp_list,supp_mask_list,query_feat_4,query_feat_3):
         '''
