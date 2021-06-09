@@ -1,294 +1,307 @@
 import os
 import random
-import time
-import cv2
 import numpy as np
-import logging
-import argparse
-import pickle
-# os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
-# os.environ["CUDA_VISIBLE_DEVICES"] = '0'
-
 import torch
 import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.nn.parallel
-import torch.optim
 import torch.utils.data
+from visdom_logger import VisdomLogger
+from collections import defaultdict
+from .dataset.dataset import get_val_loader
+from .util import AverageMeter, batch_intersectionAndUnionGPU, get_model_dir, main_process
+from .util import find_free_port, setup, cleanup, to_one_hot, intersectionAndUnionGPU
+from .classifier import Classifier
+from .model.pspnet import get_model
+import torch.distributed as dist
+from tqdm import tqdm
+from .util import load_cfg_from_cfg_file, merge_cfg_from_list
+import argparse
+from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp
-from tensorboardX import SummaryWriter
-
-from model import *
-from util import dataset
-from util import transform, config
-from util.util import AverageMeter, intersectionAndUnionGPU
-
-cv2.ocl.setUseOpenCL(False)
-cv2.setNumThreads(0)
+import time
+from .visu import make_episode_visualization
+from typing import Tuple
 
 
-def get_parser():
-    parser = argparse.ArgumentParser(description='PyTorch Semantic Segmentation')
-    parser.add_argument('--config', type=str, default='config/ade20k/ade20k_pspnet50.yaml', help='config file')
-    parser.add_argument('opts', help='see config/ade20k/ade20k_pspnet50.yaml for all options', default=None, nargs=argparse.REMAINDER)
+def parse_args() -> None:
+    parser = argparse.ArgumentParser(description='Testing')
+    parser.add_argument('--config', type=str, required=True, help='config file')
+    parser.add_argument('--opts', default=None, nargs=argparse.REMAINDER)
     args = parser.parse_args()
     assert args.config is not None
-    cfg = config.load_cfg_from_cfg_file(args.config)
+    cfg = load_cfg_from_cfg_file(args.config)
     if args.opts is not None:
-        cfg = config.merge_cfg_from_list(cfg, args.opts)
+        cfg = merge_cfg_from_list(cfg, args.opts)
     return cfg
 
 
-def get_logger():
-    logger_name = "main-logger"
-    logger = logging.getLogger(logger_name)
-    logger.setLevel(logging.INFO)
-    handler = logging.StreamHandler()
-    fmt = "[%(asctime)s %(levelname)s %(filename)s line %(lineno)d %(process)d] %(message)s"
-    handler.setFormatter(logging.Formatter(fmt))
-    logger.addHandler(handler)
-    return logger
+def main_worker(rank: int,
+                world_size: int,
+                args: argparse.Namespace) -> None:
 
+    print(f"==> Running DDP checkpoint example on rank {rank}.")
+    setup(args, rank, world_size)
 
-def worker_init_fn(worker_id):
-    random.seed(args.manual_seed + worker_id)
-
-
-# def main_process():
-#     return not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % args.ngpus_per_node == 0)
-
-
-# def main():
-#     args = get_parser()
-#     assert args.classes > 1
-#     assert args.zoom_factor in [1, 2, 4, 8]
-#     assert (args.train_h - 1) % 8 == 0 and (args.train_w - 1) % 8 == 0
-#     os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.train_gpu)
-#     if args.manual_seed is not None:
-#         cudnn.benchmark = False
-#         cudnn.deterministic = True
-#         torch.cuda.manual_seed(args.manual_seed)
-#         np.random.seed(args.manual_seed)
-#         torch.manual_seed(args.manual_seed)
-#         torch.cuda.manual_seed_all(args.manual_seed)
-#         random.seed(args.manual_seed)
-#     if args.dist_url == "env://" and args.world_size == -1:
-#         args.world_size = int(os.environ["WORLD_SIZE"])
-#     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
-#     args.ngpus_per_node = len(args.train_gpu)
-#     if len(args.train_gpu) == 1:
-#         args.sync_bn = False
-#         args.distributed = False
-#         args.multiprocessing_distributed = False
-#     if args.multiprocessing_distributed:
-#         args.world_size = args.ngpus_per_node * args.world_size
-#         mp.spawn(main_worker, nprocs=args.ngpus_per_node, args=(args.ngpus_per_node, args))
-#     else:
-#         main_worker(args.train_gpu, args.ngpus_per_node, args)
-
-
-# def main_worker(gpu, ngpus_per_node, argss):
-def main_worker(argss):
-    global args
-    args = argss
-
-    BatchNorm = nn.BatchNorm2d
-
-    criterion = nn.CrossEntropyLoss(ignore_index=args.ignore_label)
-
-    model = eval(args.arch).Model(args)
-    for param in model.layer0.parameters():
-        param.requires_grad = False
-    for param in model.layer1.parameters():
-        param.requires_grad = False
-    for param in model.layer2.parameters():
-        param.requires_grad = False
-    for param in model.layer3.parameters():
-        param.requires_grad = False
-    for param in model.layer4.parameters():
-        param.requires_grad = False
-
-    global logger, writer
-    logger = get_logger()
-    writer = SummaryWriter(args.save_path)
-    logger.info("=> creating model ...")
-    logger.info("Classes: {}".format(args.classes))
-    logger.info(model)
-    print(args)
-
-    model = torch.nn.DataParallel(model.cuda(), device_ids=[0])
-
-    # imgs_path = os.path.join(args.save_path), '../prediction/')
-
-    if args.weight:
-        if os.path.isfile(args.weight):
-            logger.info("=> loading weight '{}'".format(args.weight))
-            checkpoint = torch.load(args.weight)
-            model.load_state_dict(checkpoint['state_dict'])
-            logger.info("=> loaded weight '{}'".format(args.weight))
-        else:
-            logger.info("=> no weight found at '{}'".format(args.weight))
-            raise Exception("'no weight found at '{}'".format(args.weight))
-
-    value_scale = 255
-    mean = [0.485, 0.456, 0.406]
-    mean = [item * value_scale for item in mean]
-    std = [0.229, 0.224, 0.225]
-    std = [item * value_scale for item in std]
-
-    assert args.split in [0, 1, 2, 3, 999]
-
-    if args.resized_val:
-        val_transform = transform.Compose([
-            transform.Resize(size=args.val_size),
-            transform.ToTensor(),
-            transform.Normalize(mean=mean, std=std)])
-    else:
-        val_transform = transform.Compose([
-            transform.test_Resize(size=args.val_size),
-            transform.ToTensor(),
-            transform.Normalize(mean=mean, std=std)])
-    val_data = dataset.SemData(split=args.split, shot=args.shot, max_sp=args.max_sp, data_root=args.data_root,
-                               data_list=args.val_list, transform=val_transform, mode='val',
-                               use_coco=args.use_coco, use_split_coco=args.use_split_coco)
-    val_loader = torch.utils.data.DataLoader(val_data, batch_size=args.batch_size_val, shuffle=False,
-                                             num_workers=args.workers, pin_memory=True, sampler=None)
-    loss_val, mIoU_val, mAcc_val, allAcc_val, class_miou = validate(val_loader, model, criterion, args)
-
-def validate(val_loader, model, criterion, args):
-    # if main_process():
-    #     logger.info('>>>>>>>>>>>>>>>> Start Evaluation >>>>>>>>>>>>>>>>')
-    batch_time = AverageMeter()
-    model_time = AverageMeter()
-    data_time = AverageMeter()
-    loss_meter = AverageMeter()
-    intersection_meter = AverageMeter()
-    union_meter = AverageMeter()
-    target_meter = AverageMeter()
-    if args.use_coco:
-        split_gap = 20
-    else:
-        split_gap = 5
-    class_intersection_meter = [0]*split_gap
-    class_union_meter = [0]*split_gap
-
-    if args.manual_seed is not None and args.fix_random_seed_val:
-        torch.cuda.manual_seed(args.manual_seed)
-        np.random.seed(args.manual_seed)
-        torch.manual_seed(args.manual_seed)
-        torch.cuda.manual_seed_all(args.manual_seed)
-        random.seed(args.manual_seed)
-
-    model.eval()
-    end = time.time()
-    if args.split != 999:
-        if args.use_coco:
-            test_num = 20000
-        else:
-            test_num = 1000
-    else:
-        test_num = len(val_loader)
-    assert test_num % args.batch_size_val == 0
-    iter_num = 0
-    total_time = 0
-    protos = []
-    labels = []
-    for i, (input, target, s_input, s_mask, s_init_seed, subcls, ori_label) in enumerate(val_loader):
-        if (iter_num-1) * args.batch_size_val >= test_num:
-            break
-        iter_num += 1
-        data_time.update(time.time() - end)
-        input = input.cuda(non_blocking=True)
-        target = target.cuda(non_blocking=True)
-        ori_label = ori_label.cuda(non_blocking=True)
-        subcls = subcls[0].cpu().numpy()[0]
-        start_time = time.time()
-        output,proto = model(s_x=s_input, s_y=s_mask, x=input, y=target, s_seed=s_init_seed)
-        total_time = total_time + 1
-        model_time.update(time.time() - start_time)
-        protos.append(proto.cpu().numpy()[0])
-        labels.append(subcls)
-        if args.ori_resize:
-            longerside = max(ori_label.size(1), ori_label.size(2))
-            backmask = torch.ones(ori_label.size(0), longerside, longerside).cuda()*255
-            backmask[0, :ori_label.size(1), :ori_label.size(2)] = ori_label
-            target = backmask.clone().long()
-
-        output = F.interpolate(output, size=target.size()[1:], mode='bilinear', align_corners=True)
-        loss = criterion(output, target)
-
-        n = input.size(0)
-        loss = torch.mean(loss)
-
-        output = output.max(1)[1]
-
-        intersection, union, new_target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
-        intersection, union, target, new_target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy(), new_target.cpu().numpy()
-
-
-        intersection_meter.update(intersection), union_meter.update(union), target_meter.update(new_target)
-
-
-        class_intersection_meter[(subcls-1)%split_gap] += intersection[1]
-        class_union_meter[(subcls-1)%split_gap] += union[1]
-
-        accuracy = sum(intersection_meter.val) / (sum(target_meter.val) + 1e-10)
-        loss_meter.update(loss.item(), input.size(0))
-        batch_time.update(time.time() - end)
-        end = time.time()
-        if ((i + 1) % (test_num/100) == 0):
-            logger.info('Test: [{}/{}] '
-                        'Data {data_time.val:.3f} ({data_time.avg:.3f}) '
-                        'Batch {batch_time.val:.3f} ({batch_time.avg:.3f}) '
-                        'Loss {loss_meter.val:.4f} ({loss_meter.avg:.4f}) '
-                        'Accuracy {accuracy:.4f}.'.format(iter_num* args.batch_size_val, test_num,
-                                                          data_time=data_time,
-                                                          batch_time=batch_time,
-                                                          loss_meter=loss_meter,
-                                                          accuracy=accuracy))
-
-    iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
-    accuracy_class = intersection_meter.sum / (target_meter.sum + 1e-10)
-    mIoU = np.mean(iou_class)
-    mAcc = np.mean(accuracy_class)
-    allAcc = sum(intersection_meter.sum) / (sum(target_meter.sum) + 1e-10)
-    np.savez(args.save_path+'protos',labels=labels,protos=protos)
-
-    class_iou_class = []
-    class_miou = 0
-    for i in range(len(class_intersection_meter)):
-        class_iou = class_intersection_meter[i]/(class_union_meter[i]+ 1e-10)
-        class_iou_class.append(class_iou)
-        class_miou += class_iou
-    class_miou = class_miou*1.0 / len(class_intersection_meter)
-    logger.info('meanIoU---Val result: mIoU {:.4f}.'.format(class_miou))
-    for i in range(split_gap):
-        logger.info('Class_{} Result: iou {:.4f}.'.format(i+1, class_iou_class[i]))
-
-
-
-    logger.info('FBIoU---Val result: mIoU/mAcc/allAcc {:.4f}/{:.4f}/{:.4f}.'.format(mIoU, mAcc, allAcc))
-    for i in range(args.classes):
-        logger.info('Class_{} Result: iou/accuracy {:.4f}/{:.4f}.'.format(i, iou_class[i], accuracy_class[i]))
-    logger.info('<<<<<<<<<<<<<<<<< End Evaluation <<<<<<<<<<<<<<<<<')
-
-    print('avg inference time: {:.4f}, count: {}'.format(model_time.avg, test_num))
-    return loss_meter.avg, mIoU, mAcc, allAcc, class_miou
-
-
-if __name__ == '__main__':
-    args = get_parser()
-    assert args.classes > 1
-    assert args.zoom_factor in [1, 2, 4, 8]
-    assert (args.train_h - 1) % 8 == 0 and (args.train_w - 1) % 8 == 0
     if args.manual_seed is not None:
         cudnn.benchmark = False
         cudnn.deterministic = True
-        torch.cuda.manual_seed(args.manual_seed)
-        np.random.seed(args.manual_seed)
-        torch.manual_seed(args.manual_seed)
-        torch.cuda.manual_seed_all(args.manual_seed)
-        random.seed(args.manual_seed)
-    # torch.cuda.set_device(device=args.train_gpu)
-    main_worker(args)
+        torch.cuda.manual_seed(args.manual_seed + rank)
+        np.random.seed(args.manual_seed + rank)
+        torch.manual_seed(args.manual_seed + rank)
+        torch.cuda.manual_seed_all(args.manual_seed + rank)
+        random.seed(args.manual_seed + rank)
+
+    # ========== Model  ==========
+    model = get_model(args).to(rank)
+    model = nn.SyncBatchNorm.convert_sync_batchnorm(model)
+    model = DDP(model, device_ids=[rank])
+
+    root = get_model_dir(args)
+
+    if args.ckpt_used is not None:
+        filepath = os.path.join(root, f'{args.ckpt_used}.pth')
+        assert os.path.isfile(filepath), filepath
+        print("=> loading weight '{}'".format(filepath))
+        checkpoint = torch.load(filepath)
+        model.load_state_dict(checkpoint['state_dict'])
+        print("=> loaded weight '{}'".format(filepath))
+    else:
+        print("=> Not loading anything")
+
+    # ========== Data  ==========
+    episodic_val_loader, _ = get_val_loader(args)
+
+    # ========== Test  ==========
+    val_Iou, val_loss = episodic_validate(args=args,
+                                          val_loader=episodic_val_loader,
+                                          model=model,
+                                          use_callback=(args.visdom_port != -1),
+                                          suffix=f'test')
+    if args.distributed:
+        dist.all_reduce(val_Iou), dist.all_reduce(val_loss)
+        val_Iou /= world_size
+        val_loss /= world_size
+
+    cleanup()
+
+
+def episodic_validate(args: argparse.Namespace,
+                      val_loader: torch.utils.data.DataLoader,
+                      model: DDP,
+                      use_callback: bool,
+                      suffix: str = 'test') -> Tuple[torch.tensor, torch.tensor]:
+
+    print('==> Start testing')
+
+    model.eval()
+    nb_episodes = int(args.test_num / args.batch_size_val)
+
+    # ========== Metrics initialization  ==========
+
+    H, W = args.image_size, args.image_size
+    c = model.module.bottleneck_dim
+    h = model.module.feature_res[0]
+    w = model.module.feature_res[1]
+
+    runtimes = torch.zeros(args.n_runs)
+    deltas_init = torch.zeros((args.n_runs, nb_episodes, args.batch_size_val))
+    deltas_final = torch.zeros((args.n_runs, nb_episodes, args.batch_size_val))
+    val_IoUs = np.zeros(args.n_runs)
+    val_losses = np.zeros(args.n_runs)
+
+    # ========== Perform the runs  ==========
+    for run in tqdm(range(args.n_runs)):
+
+        # =============== Initialize the metric dictionaries ===============
+
+        loss_meter = AverageMeter()
+        iter_num = 0
+        cls_intersection = defaultdict(int)  # Default value is 0
+        cls_union = defaultdict(int)
+        IoU = defaultdict(int)
+
+        # =============== episode = group of tasks ===============
+        runtime = 0
+        for e in tqdm(range(nb_episodes)):
+            t0 = time.time()
+            features_s = torch.zeros(args.batch_size_val, args.shot, c, h, w).to(dist.get_rank())
+            features_q = torch.zeros(args.batch_size_val, 1, c, h, w).to(dist.get_rank())
+            gt_s = 255 * torch.ones(args.batch_size_val, args.shot, args.image_size,
+                                    args.image_size).long().to(dist.get_rank())
+            gt_q = 255 * torch.ones(args.batch_size_val, 1, args.image_size,
+                                    args.image_size).long().to(dist.get_rank())
+            n_shots = torch.zeros(args.batch_size_val).to(dist.get_rank())
+            classes = []  # All classes considered in the tasks
+
+            # =========== Generate tasks and extract features for each task ===============
+            with torch.no_grad():
+                for i in range(args.batch_size_val):
+                    try:
+                        qry_img, q_label, spprt_imgs, s_label, subcls, _, _ = iter_loader.next()
+                    except:
+                        iter_loader = iter(val_loader)
+                        qry_img, q_label, spprt_imgs, s_label, subcls, _, _ = iter_loader.next()
+                    iter_num += 1
+
+                    q_label = q_label.to(dist.get_rank(), non_blocking=True)
+                    spprt_imgs = spprt_imgs.to(dist.get_rank(), non_blocking=True)
+                    s_label = s_label.to(dist.get_rank(), non_blocking=True)
+                    qry_img = qry_img.to(dist.get_rank(), non_blocking=True)
+
+                    f_s = model.module.extract_features(spprt_imgs.squeeze(0))
+                    f_q = model.module.extract_features(qry_img)
+
+                    shot = f_s.size(0)
+                    n_shots[i] = shot
+                    features_s[i, :shot] = f_s.detach()
+                    features_q[i] = f_q.detach()
+                    gt_s[i, :shot] = s_label
+                    gt_q[i, 0] = q_label
+                    classes.append([class_.item() for class_ in subcls])
+
+            # =========== Normalize features along channel dimension ===============
+            if args.norm_feat:
+                features_s = F.normalize(features_s, dim=2)
+                features_q = F.normalize(features_q, dim=2)
+
+            # =========== Create a callback is args.visdom_port != -1 ===============
+            callback = VisdomLogger(port=args.visdom_port) if use_callback else None
+
+            # ===========  Initialize the classifier + prototypes + F/B parameter Π ===============
+            classifier = Classifier(args)
+            classifier.init_prototypes(features_s, features_q, gt_s, gt_q, classes, callback)
+            batch_deltas = classifier.compute_FB_param(features_q=features_q, gt_q=gt_q)
+            deltas_init[run, e, :] = batch_deltas.cpu()
+
+            # =========== Perform RePRI inference ===============
+            batch_deltas = classifier.RePRI(features_s, features_q, gt_s, gt_q, classes, n_shots, callback)
+            deltas_final[run, e, :] = batch_deltas
+            t1 = time.time()
+            runtime += t1 - t0
+            logits = classifier.get_logits(features_q)  # [n_tasks, shot, h, w]
+            logits = F.interpolate(logits,
+                                   size=(H, W),
+                                   mode='bilinear',
+                                   align_corners=True)
+            probas = classifier.get_probas(logits).detach()
+            intersection, union, _ = batch_intersectionAndUnionGPU(probas, gt_q, 2)  # [n_tasks, shot, num_class]
+            intersection, union = intersection.cpu(), union.cpu()
+
+            # ================== Log metrics ==================
+            one_hot_gt = to_one_hot(gt_q, 2)
+            valid_pixels = gt_q != 255
+            loss = classifier.get_ce(probas, valid_pixels, one_hot_gt, reduction='mean')
+            loss_meter.update(loss.item())
+            for i, task_classes in enumerate(classes):
+                for j, class_ in enumerate(task_classes):
+                    cls_intersection[class_] += intersection[i, 0, j + 1]  # Do not count background
+                    cls_union[class_] += union[i, 0, j + 1]
+
+            for class_ in cls_union:
+                IoU[class_] = cls_intersection[class_] / (cls_union[class_] + 1e-10)
+
+            if (iter_num % 200 == 0):
+                mIoU = np.mean([IoU[i] for i in IoU])
+                print('Test: [{}/{}] '
+                      'mIoU {:.4f} '
+                      'Loss {loss_meter.val:.4f} ({loss_meter.avg:.4f}) '.format(iter_num,
+                                                                                 args.test_num,
+                                                                                 mIoU,
+                                                                                 loss_meter=loss_meter,
+                                                                                 ))
+
+            # ================== Visualization ==================
+            if args.visu:
+                root = os.path.join('plots', 'episodes')
+                os.makedirs(root, exist_ok=True)
+                save_path = os.path.join(root, f'run_{run}_episode_{e}.pdf')
+                make_episode_visualization(img_s=spprt_imgs[0].cpu().numpy(),
+                                           img_q=qry_img[0].cpu().numpy(),
+                                           gt_s=s_label[0].cpu().numpy(),
+                                           gt_q=q_label[0].cpu().numpy(),
+                                           preds=probas[-1].cpu().numpy(),
+                                           save_path=save_path)
+
+
+        runtimes[run] = runtime
+        mIoU = np.mean(list(IoU.values()))
+        print('mIoU---Val result: mIoU {:.4f}.'.format(mIoU))
+        for class_ in cls_union:
+            print("Class {} : {:.4f}".format(class_, IoU[class_]))
+
+        val_IoUs[run] = mIoU
+        val_losses[run] = loss_meter.avg
+
+    # ================== Save metrics ==================
+    if args.save_oracle:
+        root = os.path.join('plots', 'oracle')
+        os.makedirs(root, exist_ok=True)
+        np.save(os.path.join(root, 'delta_init.npy'), deltas_init.numpy())
+        np.save(os.path.join(root, 'delta_final.npy'), deltas_final.numpy())
+
+    print('Average mIoU over {} runs --- {:.4f}.'.format(args.n_runs, val_IoUs.mean()))
+    print('Average runtime / run --- {:.4f}.'.format(runtimes.mean()))
+
+    return val_IoUs.mean(), val_losses.mean()
+
+
+def standard_validate(args: argparse.Namespace,
+                      val_loader: torch.utils.data.DataLoader,
+                      model: DDP,
+                      use_callback: bool,
+                      suffix: str = 'test') -> Tuple[torch.tensor, torch.tensor]:
+
+    print('==> Standard validation')
+    model.eval()
+    loss_fn = torch.nn.CrossEntropyLoss(ignore_index=255)
+    iterable_val_loader = iter(val_loader)
+
+    bar = tqdm(range(len(iterable_val_loader)))
+
+    loss = 0.
+    intersections = torch.zeros(args.num_classes_tr).to(dist.get_rank())
+    unions = torch.zeros(args.num_classes_tr).to(dist.get_rank())
+
+    with torch.no_grad():
+        for i in bar:
+            images, gt = iterable_val_loader.next()
+            images = images.to(dist.get_rank(), non_blocking=True)
+            gt = gt.to(dist.get_rank(), non_blocking=True)
+            logits = model(images).detach()
+            loss += loss_fn(logits, gt)
+            intersection, union, _ = intersectionAndUnionGPU(logits.argmax(1),
+                                                             gt,
+                                                             args.num_classes_tr,
+                                                             255)
+            intersections += intersection
+            unions += union
+        loss /= len(val_loader.dataset)
+
+    if args.distributed:
+        dist.all_reduce(loss)
+        dist.all_reduce(intersections)
+        dist.all_reduce(unions)
+
+    mIoU = (intersections / (unions + 1e-10)).mean()
+    loss /= dist.get_world_size()
+    return mIoU, loss
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    os.environ["CUDA_VISIBLE_DEVICES"] = ','.join(str(x) for x in args.gpus)
+
+    if args.debug:
+        args.test_num = 500
+        args.n_runs = 2
+
+    world_size = len(args.gpus)
+    distributed = world_size > 1
+    args.distributed = distributed
+    args.port = find_free_port()
+    mp.spawn(main_worker,
+             args=(world_size, args),
+             nprocs=world_size,
+             join=True)
