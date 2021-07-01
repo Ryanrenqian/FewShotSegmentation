@@ -191,7 +191,8 @@ class Model(nn.Module):
 
         # prior mask
         corr_query_mask = self.priormask(final_supp_list,mask_list,query_feat_4,query_feat_3,query_feat)
-
+        pri_proto = pri_proto_list[0]
+        aux_proto = aux_proto_list[0]
         if self.shot > 1:
             pri_proto = pri_proto_list[0]
             aux_proto = aux_proto_list[0]
@@ -202,9 +203,7 @@ class Model(nn.Module):
                 # channel_att = supp_feat_list[i]
             pri_proto /= len(pri_proto_list)
             aux_proto /= len(aux_proto_list)
-        else:
-            pri_proto = pri_proto_list[0]
-            aux_proto = aux_proto_list[0]
+            
 
         out,out_list = self.decoder(corr_query_mask,[pri_proto,aux_proto],query_feat)
 
@@ -225,7 +224,7 @@ class Model(nn.Module):
 
             return out.max(1)[1], main_loss, aux_loss
         else:
-            return out
+            return out,pri_proto,aux_proto
 
 
 

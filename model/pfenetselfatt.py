@@ -5,7 +5,7 @@ import numpy as np
 import random
 import time
 import cv2
-
+import pdb
 import model.resnet as models
 
 
@@ -17,7 +17,22 @@ def Weighted_GAP(supp_feat, mask):
     supp_feat = F.avg_pool2d(input=supp_feat, kernel_size=supp_feat.shape[-2:]) * feat_h * feat_w / area  
     return supp_feat
   
+class SELayer(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(SELayer, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(channel, channel // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(channel // reduction, channel, bias=False),
+            nn.Sigmoid()
+        )
 
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.avg_pool(x).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        return x * y.expand_as(x)
 
 class Model(nn.Module):
     def __init__(self, args):
@@ -78,7 +93,8 @@ class Model(nn.Module):
             nn.Conv2d(fea_dim, reduce_dim, kernel_size=1, padding=0, bias=False),
             nn.ReLU(inplace=True),
             nn.Dropout2d(p=0.5)                   
-        )  
+        )
+        self.se = SELayer(reduce_dim)
 
         self.pyramid_bins = self.ppm_scales
         self.avgpool_list = []
@@ -88,6 +104,8 @@ class Model(nn.Module):
                     nn.AdaptiveAvgPool2d(bin)
                 )
 
+
+        factor = 1
         mask_add_num = 1
         self.init_merge = []
         self.beta_conv = []
@@ -152,10 +170,12 @@ class Model(nn.Module):
             query_feat_4 = self.layer4(query_feat_3)
 
         query_feat = torch.cat([query_feat_3, query_feat_2], 1)
+        query_feat += self.se(query_feat)
         query_feat = self.down_query(query_feat)
 
         #   Support Feature     
         supp_feat_list = []
+        aux_feat_list = []
         final_supp_list = []
         mask_list = []
         for i in range(self.shot):
@@ -173,8 +193,11 @@ class Model(nn.Module):
             
             supp_feat = torch.cat([supp_feat_3, supp_feat_2], 1)
             supp_feat = self.down_supp(supp_feat)
-            supp_feat = Weighted_GAP(supp_feat, mask)
-            supp_feat_list.append(supp_feat)
+            supp_feat += self.se(supp_feat)
+            supp_feat_v = Weighted_GAP(supp_feat, mask)
+            # 计算sup上的相似率
+            supp_feat_list.append(supp_feat_v)
+
 
 
         corr_query_mask_list = []
@@ -207,13 +230,45 @@ class Model(nn.Module):
         corr_query_mask = F.interpolate(corr_query_mask, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear', align_corners=True)  
 
         if self.shot > 1:
-            supp_feat = supp_feat_list[0]
+            supp_feat_v = supp_feat_list[0]
+            aux_feat_v = aux_feat_list[0]
             for i in range(1, len(supp_feat_list)):
-                supp_feat += supp_feat_list[i]
-            supp_feat /= len(supp_feat_list)
-        out,out_list = self.decoder(corr_query_mask,supp_feat,query_feat)
-        # refine query mask:
+                supp_feat_v += supp_feat_list[i]
+                aux_feat_v += aux_feat_list[0]
+            supp_feat_v /= len(supp_feat_list)
+            aux_feat_v /= len(aux_feat_list)
+        out_list = []
+        pyramid_feat_list = []
 
+        for idx, tmp_bin in enumerate(self.pyramid_bins):
+            if tmp_bin <= 1.0:
+                bin = int(query_feat.shape[2] * tmp_bin)
+                query_feat_bin = nn.AdaptiveAvgPool2d(bin)(query_feat)
+            else:
+                bin = tmp_bin
+                query_feat_bin = self.avgpool_list[idx](query_feat)
+            supp_feat_bin = supp_feat_v.expand(-1, -1, bin, bin)
+
+            corr_mask_bin = F.interpolate(corr_query_mask, size=(bin, bin), mode='bilinear', align_corners=True)
+            merge_feat_bin = torch.cat([query_feat_bin, supp_feat_bin,corr_mask_bin], 1)
+            merge_feat_bin = self.init_merge[idx](merge_feat_bin)
+
+            if idx >= 1:
+                pre_feat_bin = pyramid_feat_list[idx-1].clone()
+                pre_feat_bin = F.interpolate(pre_feat_bin, size=(bin, bin), mode='bilinear', align_corners=True)
+                rec_feat_bin = torch.cat([merge_feat_bin, pre_feat_bin], 1)
+                merge_feat_bin = self.alpha_conv[idx-1](rec_feat_bin) + merge_feat_bin  
+
+            merge_feat_bin = self.beta_conv[idx](merge_feat_bin) + merge_feat_bin   
+            inner_out_bin = self.inner_cls[idx](merge_feat_bin)
+            merge_feat_bin = F.interpolate(merge_feat_bin, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear', align_corners=True)
+            pyramid_feat_list.append(merge_feat_bin)
+            out_list.append(inner_out_bin)
+                 
+        query_feat = torch.cat(pyramid_feat_list, 1)
+        query_feat = self.res1(query_feat)
+        query_feat = self.res2(query_feat) + query_feat           
+        out = self.cls(query_feat)
         
 
         #   Output Part
@@ -231,55 +286,7 @@ class Model(nn.Module):
             aux_loss = aux_loss / len(out_list)
             return out.max(1)[1], main_loss, aux_loss
         else:
-            return out, supp_feat,None
-
-
-    def decoder(self,corr_query_mask,prototype,query_feat):
-        '''
-
-        Args:
-            corr_query_mask: pior mask
-            prototype: prototype
-            query_feat:
-            y:
-
-        Returns:
-
-        '''
-        out_list = []
-        pyramid_feat_list = []
-
-        for idx, tmp_bin in enumerate(self.pyramid_bins):
-            if tmp_bin <= 1.0:
-                bin = int(query_feat.shape[2] * tmp_bin)
-                query_feat_bin = nn.AdaptiveAvgPool2d(bin)(query_feat)
-            else:
-                bin = tmp_bin
-                query_feat_bin = self.avgpool_list[idx](query_feat)
-            supp_feat_bin = prototype.expand(-1, -1, bin, bin)
-            corr_mask_bin = F.interpolate(corr_query_mask, size=(bin, bin), mode='bilinear', align_corners=True)
-            merge_feat_bin = torch.cat([query_feat_bin, supp_feat_bin, corr_mask_bin], 1)
-            merge_feat_bin = self.init_merge[idx](merge_feat_bin)
-
-            if idx >= 1:
-                pre_feat_bin = pyramid_feat_list[idx - 1].clone()
-                pre_feat_bin = F.interpolate(pre_feat_bin, size=(bin, bin), mode='bilinear', align_corners=True)
-                rec_feat_bin = torch.cat([merge_feat_bin, pre_feat_bin], 1)
-                merge_feat_bin = self.alpha_conv[idx - 1](rec_feat_bin) + merge_feat_bin
-
-            merge_feat_bin = self.beta_conv[idx](merge_feat_bin) + merge_feat_bin
-            inner_out_bin = self.inner_cls[idx](merge_feat_bin)
-            merge_feat_bin = F.interpolate(merge_feat_bin, size=(query_feat.size(2), query_feat.size(3)),
-                                           mode='bilinear', align_corners=True)
-            pyramid_feat_list.append(merge_feat_bin)
-            out_list.append(inner_out_bin)
-
-        query_feat = torch.cat(pyramid_feat_list, 1)
-        query_feat = self.res1(query_feat)
-        query_feat = self.res2(query_feat) + query_feat
-        out = self.cls(query_feat)
-        return out,out_list
-
+            return out
 
     def _optimizer(self, args):
         optimizer = torch.optim.SGD(

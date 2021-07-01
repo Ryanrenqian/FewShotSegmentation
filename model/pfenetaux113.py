@@ -185,47 +185,69 @@ class Model(nn.Module):
                 aux_proto += aux_proto_list[i]
             pri_proto /= len(pri_proto_list)
             aux_proto /= len(pri_proto_list)
-
-        out, fgloss = self.decoder(corr_query_mask,[pri_proto,aux_proto], query_feat,y.long())
+        mergefeat = torch.cat([proto.expand(-1, -1, query_feat.size(2), query_feat.size(3)) for proto in [pri_proto,aux_proto]], dim=1)
+        mergefeat = torch.cat([query_feat,mergefeat],dim=1)
+        out, fgloss = self.decoder(corr_query_mask,mergefeat,y.long())
 
         if self.training:
             # calculate query
-            y_ = torch.where(y != 255, 1 - y, y).unsqueeze(1)
-            bg_mask = F.interpolate(y_.float(), size=(query_feat_4.size(2), query_feat_4.size(3)), mode='bilinear',
-                                    align_corners=True)
-            _,_,probs = self.generate_proto(query_feat_4,bg_mask)
-            probs = F.interpolate(probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',align_corners=True)
-            aux_proto_bg = Weighted_GAP(query_feat,probs[:,0,:,:].unsqueeze(1))
-            pri_proto_bg = Weighted_GAP(query_feat,probs[:,1,:,:].unsqueeze(1))
-            # calculate bgmask
-            finnal_query_list = [self.layer4(query_feat_3*bg_mask)]
-            corr_query_bgmask = self.priormask(finnal_query_list,[bg_mask],query_feat_4,query_feat_3)
-            corr_query_bgmask = F.interpolate(corr_query_bgmask, size=(query_feat.size(2), query_feat.size(3)),
-                                            mode='bilinear',
-                                            align_corners=True)
-            bg, bg_loss = self.decoder(corr_query_bgmask,[pri_proto_bg,aux_proto_bg], query_feat,y_.squeeze(1))
+            _, bg_loss = self.bg_decoder(y,query_feat,query_feat_4,query_feat_3)
             return out.max(1)[1], fgloss, bg_loss
         else:
-            return out, pri_proto,aux_proto
+            return out,pri_proto,aux_proto
+
+    def bg_decoder(self,y,query_feat,query_feat_4,query_feat_3):
+        y_ = torch.where(y != 255, 1 - y, y).unsqueeze(1)
+        bg_mask = F.interpolate(y_.float(), size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',align_corners=True)
+        finnal_query_list = [self.layer4(query_feat_3*bg_mask)]
+        corr_query_bgmask = self.priormask(finnal_query_list,[bg_mask],query_feat_4,query_feat_3)
+        corr_query_bgmask = F.interpolate(corr_query_bgmask, size=(query_feat.size(2), query_feat.size(3)),mode='bilinear',align_corners=True)
+        prototypes = []
+        _,_,probs = self.generate_proto(query_feat_4,bg_mask)
+        probs = F.interpolate(probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',align_corners=True)
+        aux_probs = F.interpolate(1-probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',align_corners=True)
+        aux = Weighted_GAP(query_feat,aux_probs)
+        pri = Weighted_GAP(query_feat,probs)
+        prototypes.append(torch.cat([pri,aux],dim=1).squeeze(0).unsqueeze(1)) #   2c x2
+        
+        mask1 = torch.where(probs>0.5,torch.ones_like(bg_mask),torch.zeros_like(bg_mask))
+        _,_,probs = self.generate_proto(query_feat_4,mask1)
+        probs = F.interpolate(probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',align_corners=True)
+        aux_probs = F.interpolate(1-probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',align_corners=True)
+        aux = Weighted_GAP(query_feat,aux_probs)
+        pri = Weighted_GAP(query_feat,probs)
+        prototypes.append(torch.cat([pri,aux],dim=1).squeeze(0).unsqueeze(1)) #   2c x3
+        mask2 = bg_mask - mask1
+        guide_mask = bg_mask+mask2
+        _,_,probs = self.generate_proto(query_feat_4,mask2)
+        aux = Weighted_GAP(query_feat,aux_probs)
+        pri = Weighted_GAP(query_feat,probs)
+        prototypes.append(torch.cat([pri,aux],dim=1)) #   2c x n
+        sp_center = torch.cat(prototypes) # 2c x n
+        guide_feat = sp_center[:,guide_mask.squeeze(0)].unsqueeze(0) # 1 x 2c x w x h
+        merge_feat = torch.cat(query_feat,guide_feat)
+        return self.decoder(corr_query_bgmask,merge_feat,y_.squeeze(1))
+        
+        
+
+    def extract_mid_feats(self,x):
+        with torch.no_grad():
+            query_feat_0 = self.layer0(x)
+            query_feat_1 = self.layer1(query_feat_0)
+            query_feat_2 = self.layer2(query_feat_1)
+            query_feat_3 = self.layer3(query_feat_2)
+            query_feat = torch.cat([query_feat_3, query_feat_2], 1)
+            query_feat = self.down_supp(query_feat)
+        return query_feat
+
 
     def generate_proto(self,feats,mask):
-        '''
-        EM based main rec with cosine kernel
-        '''
         pri_proto = Weighted_GAP(feats, mask)
-#         print(mask.size())
-        probs = F.cosine_similarity(feats, pri_proto, dim=1).unsqueeze(1)
-        aux_probs = (1 - probs) * mask
-        aux_proto = Weighted_GAP(feats, aux_probs)
         for i in range(self.EM_k):
             probs = F.cosine_similarity(feats, pri_proto, dim=1).unsqueeze(1)
-            aux_probs = F.cosine_similarity(feats,aux_proto,dim=1).unsqueeze(1)
-            p = torch.cat([probs,aux_probs],dim=1)
-            
-            probs = F.softmax(p,dim=1)
-#             print(probs[:,0,:,:].unsqueeze(1).size())
-            pri_proto = Weighted_GAP(feats,probs[:,0,:,:].unsqueeze(1))
-            aux_proto = Weighted_GAP(feats, probs[:,1,:,:].unsqueeze(1))
+            pri_proto = Weighted_GAP(feats, probs)
+        aux_probs = (1 - probs) * mask
+        aux_proto = Weighted_GAP(feats, aux_probs)
         return pri_proto,aux_proto,probs
 
 
@@ -272,31 +294,29 @@ class Model(nn.Module):
 
         return corr_query_mask
 
-    def decoder(self,corr_query_mask, prototypes, query_feat: torch.Tensor,mask: torch.Tensor):
+    def decoder(self,corr_query_mask, merge_feat: torch.Tensor,mask: torch.Tensor):
         '''
 
         Args:
             corr_query_mask:
             prototype:
             query_feat:
-
         Returns:
 
         '''
 
         out_list = []
         pyramid_feat_list = []
-        size=int((473-1)/8 * self.zoom_factor + 1)
+        size=int((self.input_size-1)/8 * self.zoom_factor + 1)
         for idx, tmp_bin in enumerate(self.pyramid_bins):
             if tmp_bin <= 1.0:
                 bin = int(query_feat.shape[2] * tmp_bin)
-                query_feat_bin = nn.AdaptiveAvgPool2d(bin)(query_feat)
+                merge_feat_bin = nn.AdaptiveAvgPool2d(bin)(query_feat)
             else:
                 bin = tmp_bin
-                query_feat_bin = self.avgpool_list[idx](query_feat)
-            proto_feat_bin = torch.cat([proto.expand(-1, -1, bin, bin) for proto in prototypes], dim=1)
+                merge_feat_bin = self.avgpool_list[idx](merge_feat)
             corr_mask_bin = F.interpolate(corr_query_mask, size=(bin, bin), mode='bilinear', align_corners=True)
-            merge_feat_bin = torch.cat([query_feat_bin, proto_feat_bin, corr_mask_bin], 1)
+            merge_feat_bin = torch.cat([merge_feat_bin, corr_mask_bin], 1)
             merge_feat_bin = self.init_merge[idx](merge_feat_bin)
 
             if idx >= 1:

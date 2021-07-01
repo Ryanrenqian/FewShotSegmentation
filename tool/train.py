@@ -1,4 +1,4 @@
-﻿import os
+import os
 import random
 import time
 import cv2
@@ -236,7 +236,12 @@ def train(train_loader, model, optimizer, epoch):
         loss.backward()
         optimizer.step()
         n = input.size(0)
-
+        if np.isnan(loss.item()):
+            raise ValueError('Loss value is NaN!')
+        if np.isnan(main_loss.item()):
+            raise ValueError('main_loss value is NaN!')
+        if np.isnan(aux_loss.item()):
+            raise ValueError('aux_loss value is NaN!')
         intersection, union, target = intersectionAndUnionGPU(output, target, args.classes, args.ignore_label)
 
         intersection, union, target = intersection.cpu().numpy(), union.cpu().numpy(), target.cpu().numpy()
@@ -347,7 +352,7 @@ def validate(val_loader, model, criterion):
 
             output = F.interpolate(output, size=target.size()[1:], mode='bilinear', align_corners=True)
             loss = criterion(output, target)
-
+            
             total_time = total_time + 1
             model_time.update(time.time() - start_time)
             #

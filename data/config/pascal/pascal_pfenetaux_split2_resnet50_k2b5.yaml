@@ -34,7 +34,7 @@ TRAIN:
   print_freq: 5
   save_freq: 20
   save_path: exp/pfenetaux/pascal/split2_resnet50_k2/model
-  weight: 
+  weight: exp/pfenetaux/pascal/split2_resnet50_k2/model/train_epoch_84_0.7159979238617138.pth
   resume: 
   evaluate: True
   split: 2

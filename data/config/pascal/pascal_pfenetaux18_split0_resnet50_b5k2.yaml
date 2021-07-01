@@ -33,7 +33,7 @@ TRAIN:
   manual_seed: 321
   print_freq: 5
   save_freq: 20
-  save_path: exp/pfenetaux18/pascal/split0_resnet50_k2/model
+  save_path: exp/pfenetaux18/pascal/split0_resnet50_b5k2/model
   weight: 
   resume: 
   evaluate: True

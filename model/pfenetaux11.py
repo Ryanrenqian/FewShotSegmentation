@@ -31,7 +31,7 @@ class Model(nn.Module):
         self.criterion = nn.CrossEntropyLoss(ignore_index=255)
         self.shot = args.shot
         assert layers in [50, 101, 152]
-
+        self.input_size = args.train_h
         self.ppm_scales = args.ppm_scales
         self.EM_k = args.emk
         models.BatchNorm = BatchNorm
@@ -179,6 +179,8 @@ class Model(nn.Module):
                                         align_corners=True)
         pri_proto = pri_proto_list[0]
         aux_proto = aux_proto_list[0]
+        if np.any(np.isnan(pri_proto.cpu().detach().numpy())) or np.any(np.isnan(aux_proto.cpu().detach().numpy())):
+            raise ValueError('pri_proto or aux_proto value is NaN!')
         if self.shot > 1:
             for i in range(1, len(pri_proto_list)):
                 pri_proto += pri_proto_list[i]
@@ -194,20 +196,25 @@ class Model(nn.Module):
             bg_mask = F.interpolate(y_.float(), size=(query_feat_4.size(2), query_feat_4.size(3)), mode='bilinear',
                                     align_corners=True)
             _,_,probs = self.generate_proto(query_feat_4,bg_mask)
-            probs = F.interpolate(probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',align_corners=True)
-            aux_probs = 1-probs
+            probs = F.interpolate(probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
+                                    align_corners=True)
+            aux_probs = F.interpolate(1-probs, size=(query_feat.size(2), query_feat.size(3)), mode='bilinear',
+                                    align_corners=True)
             aux_proto_bg = Weighted_GAP(query_feat,aux_probs)
             pri_proto_bg = Weighted_GAP(query_feat,probs)
+            if np.any(np.isnan(aux_proto_bg.cpu().detach().numpy())) or np.any(np.isnan(pri_proto_bg.cpu().detach().numpy())):
+                raise ValueError('pri_proto or aux_proto value of is NaN!')
             # calculate bgmask
             finnal_query_list = [self.layer4(query_feat_3*bg_mask)]
             corr_query_bgmask = self.priormask(finnal_query_list,[bg_mask],query_feat_4,query_feat_3)
             corr_query_bgmask = F.interpolate(corr_query_bgmask, size=(query_feat.size(2), query_feat.size(3)),
                                             mode='bilinear',
                                             align_corners=True)
+            
             bg, bg_loss = self.decoder(corr_query_bgmask,[pri_proto_bg,aux_proto_bg], query_feat,y_.squeeze(1))
             return out.max(1)[1], fgloss, bg_loss
         else:
-            return out
+            return out, pri_proto, aux_proto
 
     def generate_proto(self,feats,mask):
         pri_proto = Weighted_GAP(feats, mask)
@@ -276,7 +283,7 @@ class Model(nn.Module):
 
         out_list = []
         pyramid_feat_list = []
-        size=int((473-1)/8 * self.zoom_factor + 1)
+        size=int((self.input_size-1)/8 * self.zoom_factor + 1)
         for idx, tmp_bin in enumerate(self.pyramid_bins):
             if tmp_bin <= 1.0:
                 bin = int(query_feat.shape[2] * tmp_bin)
